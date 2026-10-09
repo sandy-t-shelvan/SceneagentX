@@ -23,10 +23,13 @@ import numpy as np
 import trimesh
 
 from tools.common.status import load_status, save_status, set_path
-from tools.step02_splatfacto import count_gaussians, splat_path
+from tools.step02_splatfacto import count_gaussians
 
 SH_C0 = 0.28209479177387814
 GAUSSIAN_DTYPE = np.dtype("<f4")
+# iPad LiDAR is approximately metres. Millimetre exports and empty scales are not.
+PLAUSIBLE_MIN_M = 1e-3
+PLAUSIBLE_MAX_M = 20.0
 
 
 def rgb_to_sh(rgb: np.ndarray) -> np.ndarray:
@@ -242,10 +245,16 @@ def convert_mesh(
         points, normals, colors = sample_cloud(geometry, count, seed)
         spacing = cloud_spacing(points)
         kind = "point_cloud"
+    side = float(np.ptp(points, axis=0).max())
+    if length_m is None and not (PLAUSIBLE_MIN_M <= side <= PLAUSIBLE_MAX_M):
+        raise ValueError(
+            f"longest side is {side:.4g}, outside {PLAUSIBLE_MIN_M:g}–{PLAUSIBLE_MAX_M:g} m. "
+            "Pass --length-m with a ruler measurement."
+        )
     scale_factor = 1.0
     if length_m is not None:
         points, spacing, scale_factor = apply_length(points, spacing, length_m)
-    gaussians = build_gaussians(points, normals, colors)
+    gaussians = build_gaussians(points, normals, colors, spacing)
     write_gaussian_ply(destination, gaussians)
     written = count_gaussians(destination)
     return {
@@ -272,7 +281,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Initialize a 3D Gaussian splat from a Polycam mesh or point cloud"
     )
-    parser.add_argument("--mesh", type=Path, required=True, help="PLY, OBJ, GLB, or STL from Polycam")
+    parser.add_argument("--mesh", type=Path, required=True, help="OBJ, PLY, GLTF, or GLB from Polycam")
     parser.add_argument("--obj", default="marker")
     parser.add_argument("--orbit", type=int, default=1)
     parser.add_argument("--root", type=Path, default=None)
@@ -281,16 +290,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--length-m", type=float, default=None, help="Scale the longest side to this length in metres")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args(argv)
-    destination = args.out or splat_path(args.obj, args.orbit, args.root)
+    from tools.ingest import InputError, ingest_mesh
+
     try:
-        result = convert_mesh(args.mesh, destination, args.n_gaussians, args.seed, args.length_m)
-        record_mesh_splat(args.obj, args.orbit, result, args.root)
-    except (OSError, ValueError) as exc:
+        result = ingest_mesh(
+            args.obj,
+            args.mesh,
+            args.root,
+            length_m=args.length_m,
+            n_gaussians=args.n_gaussians,
+            orbit=args.orbit,
+            seed=args.seed,
+        )
+        if args.out is not None and Path(result["splat"]) != args.out:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_bytes(Path(result["splat"]).read_bytes())
+    except (OSError, ValueError, InputError) as exc:
         sys.stderr.write(f"{exc}\n")
         return 2
     sys.stdout.write(
         f"wrote {result['n_gaussians']} gaussians to {result['splat']}\n"
-        "source mesh  photometric scores not measured (no capture photos)\n"
+        f"synthetic views {result['n_synthetic_views']}  photometric scores not measured (no capture photos)\n"
     )
     return 0
 
