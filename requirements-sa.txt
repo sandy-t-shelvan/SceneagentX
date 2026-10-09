@@ -1,0 +1,7 @@
+# CPU subset of env/sa.yml for local frame checks and unit tests.
+# The GPU box installs env/sa.yml instead, which adds the CUDA 12.1 PyTorch pin.
+numpy>=1.26
+opencv-python-headless>=4.9
+pytest>=8.0
+jsonschema>=4.18
+trimesh>=4.0  # For Polycam mesh import

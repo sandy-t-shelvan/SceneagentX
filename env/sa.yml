@@ -1,0 +1,16 @@
+# Orchestration env. B0 requires this env to import torch and see CUDA.
+# Local CPU tests use requirements-sa.txt and do not install this pin.
+# If `import torch` is false on the GPU box, change this pin. Do not patch third_party/.
+name: sa
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu121
+      - torch==2.1.2+cu121
+      - numpy>=1.26
+      - opencv-python-headless>=4.9
+      - pytest>=8.0
+      - jsonschema>=4.18

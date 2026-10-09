@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.mypy_cache/
+
+# Captures, splats, and renders are large and local.
+data/**
+!data/.gitkeep
+
+# Working extracts of the uploaded plan. The source documents live outside the repo.
+_plan_extract.txt
+_plan_full.txt

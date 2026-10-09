@@ -1,0 +1,2 @@
+setup.sh text eol=lf
+env/*.yml text eol=lf

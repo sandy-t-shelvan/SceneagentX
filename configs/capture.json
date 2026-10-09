@@ -1,0 +1,15 @@
+{
+  "extract_fps": 4,
+  "tag_family": "tag36h11",
+  "tag_size_m": 0.05,
+  "sheet_every": 20,
+  "orbits": [1, 2, 3],
+  "frame_count_min": 150,
+  "frame_count_max": 250,
+  "laplacian_median_min": 100,
+  "low_sharp_cutoff": 50,
+  "low_sharp_fraction_max": 0.10,
+  "tag_fraction_min": 0.80,
+  "luminance_std_ratio_max": 0.05,
+  "stills_expected": 5
+}

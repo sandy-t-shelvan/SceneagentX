@@ -1,0 +1,11 @@
+# B8 mesh. Torch is enough for the B0 CUDA check.
+# Before B8, clone https://github.com/hbb1/2d-gaussian-splatting into third_party/2d-gaussian-splatting.
+name: 2dgs
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu121
+      - torch==2.1.2+cu121

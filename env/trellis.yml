@@ -1,0 +1,13 @@
+# B14 generative sisters. Torch is enough for the B0 CUDA check.
+# Before B14, clone https://github.com/microsoft/TRELLIS into third_party/TRELLIS
+# and download the TRELLIS image-to-3D weights. An image-edit model is also required
+# and is not vendored here.
+name: trellis
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu121
+      - torch==2.1.2+cu121
