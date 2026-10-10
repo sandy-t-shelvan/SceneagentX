@@ -5,3 +5,4 @@ opencv-python-headless>=4.9
 pytest>=8.0
 jsonschema>=4.18
 trimesh>=4.0  # For Polycam mesh import
+scipy>=1.11  # Convex hull when a Polycam export is a point cloud

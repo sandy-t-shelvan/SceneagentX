@@ -31,6 +31,14 @@ python -m tools.pipeline --obj marker --through B4
 
 ## GPU box (B0)
 
+Code stays on the laptop. GPU programs run on the rented Vast machine. From PowerShell on this laptop:
+
+```powershell
+ssh -i $env:USERPROFILE\.ssh\ssh_sceneagentX_1 -p 6525 root@192.234.50.153
+```
+
+That host is the current California RTX 4090 (driver 580.119). The port and IP change if the instance is destroyed. The private key stays in the user `.ssh` folder and is not committed.
+
 The plan's machine is a Linux box with an RTX 4090 or 5090, driver >= 550, and micromamba. Every env pins `torch==2.1.2+cu121`. `env/nerf.yml` also installs COLMAP, nerfstudio 1.1.4, and the gsplat 1.0.0 release that nerfstudio 1.1.4 requires.
 
 ```bash

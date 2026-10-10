@@ -3,7 +3,8 @@ from pathlib import Path
 import numpy as np
 
 from tools.common.status import load_status
-from tools.step01_colmap import evaluate_colmap, parse_analyzer, run_orbit
+from tools.check_env import CmdResult
+from tools.step01_colmap import _run_process, evaluate_colmap, parse_analyzer, run_orbit
 from tools.viz_cameras import far_camera_count, plot_cameras, read_images_txt
 
 ANALYZER = """
@@ -60,6 +61,21 @@ def test_two_rings_plot_and_colmap_pass(tmp_path: Path):
     assert orbit["passed"] is True
     assert (tmp_path / "data" / "marker" / "renders" / "step01" / "orbit1_cameras.png").is_file()
     assert next(step for step in doc["steps"] if step["id"] == "B2")["state"] == "pass"
+
+
+def test_frame_matching_is_sequential(tmp_path: Path):
+    calls = []
+
+    def runner(cmd, timeout):
+        calls.append(cmd)
+        return CmdResult(0, "", "")
+
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    _run_process("images", frames, tmp_path / "out", runner)
+    assert calls[0][0:2] == ["ns-process-data", "images"]
+    assert "--matching-method" in calls[0]
+    assert calls[0][calls[0].index("--matching-method") + 1] == "sequential"
 
 
 def test_far_camera_is_flagged(tmp_path: Path):

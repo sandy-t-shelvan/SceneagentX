@@ -123,6 +123,10 @@ def _run_process(
         "--output-dir",
         str(output),
     ]
+    # Video frames match their neighbors. The vocab-tree matcher is the wrong
+    # retry: nerfstudio's tree is legacy flann, and COLMAP 4.1 expects faiss.
+    if kind == "images":
+        cmd.extend(["--matching-method", "sequential"])
     return runner(cmd, 60 * 60)
 
 

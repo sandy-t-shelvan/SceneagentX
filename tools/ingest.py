@@ -141,7 +141,7 @@ def _classify_file(path: Path) -> dict[str, Any]:
     if suffix in IMAGE_SUFFIXES:
         return _video_record(path, cameras=False, capture_images=True)
     if suffix in MESH_SUFFIXES:
-        extras = _capture_extras(path.parent, ignore=path)
+        extras = _capture_extras(path.parent, ignore=path, stem=path.stem)
         if extras:
             raise InputError(_mixed_message(path, extras))
         return _mesh_record(path)
@@ -167,7 +167,13 @@ def _classify_directory(path: Path) -> dict[str, Any]:
     raise InputError(f"{path} has no video and no .obj, .ply, .gltf, or .glb mesh.")
 
 
-def _capture_extras(directory: Path, ignore: Path | None = None) -> list[Path]:
+def _capture_extras(directory: Path, ignore: Path | None = None, stem: str | None = None) -> list[Path]:
+    """Capture files that belong to this scan.
+
+    A mesh file only refuses cameras.json, an images/frames/raw folder, and
+    photos or videos that share its filename. Other files in a downloads
+    folder are not part of the scan.
+    """
     if not directory.is_dir():
         return []
     extras: list[Path] = []
@@ -181,11 +187,15 @@ def _capture_extras(directory: Path, ignore: Path | None = None) -> list[Path]:
         folder = directory / name
         if folder.is_dir() and (_files_with(folder, IMAGE_SUFFIXES) or _files_with(folder, VIDEO_SUFFIXES)):
             extras.append(folder)
+    wanted = stem.lower() if stem is not None else None
     for path in directory.iterdir():
         if ignore is not None and path.resolve() == ignore.resolve():
             continue
-        if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES | IMAGE_SUFFIXES:
-            extras.append(path)
+        if not path.is_file() or path.suffix.lower() not in VIDEO_SUFFIXES | IMAGE_SUFFIXES:
+            continue
+        if wanted is not None and path.stem.lower() != wanted:
+            continue
+        extras.append(path)
     return extras
 
 
@@ -241,7 +251,11 @@ def _render_view(geometry: Any, azimuth_deg: float, width: int, height: int) -> 
     else:
         points = np.asarray(geometry.vertices, dtype=np.float64)
         faces = None
-        face_colors = _colors_for_vertices(geometry, np.arange(len(points)), len(points))
+        choice = np.arange(len(points))
+        if len(points) > 8000:
+            choice = np.random.default_rng(0).choice(len(points), size=8000, replace=False)
+            points = points[choice]
+        face_colors = _colors_for_vertices(geometry, choice, len(points))
     if len(points) == 0:
         return image
     center = (points.min(axis=0) + points.max(axis=0)) / 2.0

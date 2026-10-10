@@ -16,11 +16,14 @@ if str(_ROOT) not in sys.path:
 
 import argparse
 
+from tools.agent_loop import SkillFault, choose_path, run_skill
 from tools.align import run_align
 from tools.check_env import Runner, run_b0
 from tools.common.blocks import blocks_through, get_block
 from tools.common.status import StatusError, load_status, save_status, set_path
 from tools.ingest import COLMAP_BLOCKS, InputError, classify_input, colmap_refused, ingest_mesh, refusal_message
+from tools.mesh_stages import GPU_ONLY, run_mesh_through
+from tools.video_input import find_video, record_absent
 from tools.step00_check_frames import check_object
 from tools.step01_colmap import run_orbit as run_colmap_orbit
 from tools.step02_splatfacto import run_orbit as run_splat_orbit
@@ -63,9 +66,20 @@ def run(
                 f"polycam_mesh  gaussians {result['n_gaussians']}  "
                 f"synthetic views {result['n_synthetic_views']}  COLMAP not run\n"
             )
-            if last.id in COLMAP_BLOCKS or _at_or_after(last.id, "B2"):
+            if last.id in COLMAP_BLOCKS:
                 sys.stderr.write(refusal_message())
                 return 2
+            if last.id in GPU_ONLY:
+                code = run_mesh_through(obj, "B14", root)
+                if code != 0:
+                    return code
+                sys.stderr.write(
+                    f"{last.id} needs Isaac Lab or a robot and is not in this repo. "
+                    "The mesh scene is packaged through B14.\n"
+                )
+                return 3
+            if _at_or_after(last.id, "B4"):
+                return run_mesh_through(obj, last.id, root)
             return 0
     for block in blocks_through(last.id):
         if block.id == "B0":
@@ -75,10 +89,27 @@ def run(
         elif block.id in COLMAP_BLOCKS and colmap_refused(load_status(obj, root)):
             sys.stderr.write(refusal_message())
             return 2
+        elif block.id in COLMAP_BLOCKS and find_video(obj, root) is None:
+            record_absent(obj, root)
+            sys.stderr.write(
+                "COLMAP and splatfacto require data/<obj>/raw/orbit1.mp4. "
+                "They were not started on this input.\n"
+            )
+            return 2
         elif block.id == "B2":
-            code = run_colmap_orbit(obj, 1, root, runner)
+            code, _called = run_skill(
+                obj,
+                "B2",
+                lambda _parameter: _video_program(run_colmap_orbit, obj, root, runner),
+                root,
+            )
         elif block.id == "B3":
-            code = run_splat_orbit(obj, 1, root, runner)
+            code, _called = run_skill(
+                obj,
+                "B3",
+                lambda _parameter: _video_program(run_splat_orbit, obj, root, runner),
+                root,
+            )
         elif block.id == "B4":
             code = run_align(obj, root, runner)
         else:
@@ -93,6 +124,14 @@ def run(
             sys.stderr.write(f"Stopped at {block.id}. Later blocks were not started.\n")
             return code
     return 0
+
+
+def _video_program(program, obj: str, root: Path | None, runner: Runner | None) -> None:
+    if choose_path(obj, root) == "ply":
+        raise SkillFault("COLMAP is refused for a ply")
+    code = program(obj, 1, root, runner)
+    if code != 0:
+        raise SkillFault(f"{program.__name__} exited {code}")
 
 
 def _env_for(block_id: str) -> str:
@@ -127,7 +166,14 @@ def _print_blocks() -> None:
     from tools.common.blocks import BLOCKS
 
     for block in BLOCKS:
-        implemented = "ready" if block.phase <= 2 else "later"
+        if block.id in GPU_ONLY:
+            implemented = "needs robot"
+        elif block.phase <= 2 or block.id in {
+            "B4", "B5", "B6", "B7", "B8", "B9", "B10", "B11", "B12", "B13", "B14"
+        }:
+            implemented = "ready"
+        else:
+            implemented = "later"
         sys.stdout.write(f"{block.id}  phase {block.phase}  {implemented}  {block.summary}\n")
 
 
@@ -145,7 +191,7 @@ def main(argv: list[str] | None = None) -> int:
         _print_blocks()
         return 0
     try:
-        return run(
+        code = run(
             args.obj,
             args.through,
             args.root,
@@ -156,6 +202,22 @@ def main(argv: list[str] | None = None) -> int:
     except (StatusError, KeyError, RuntimeError) as exc:
         sys.stderr.write(f"{exc}\n")
         return 2
+    try:
+        _refresh_changelog(args.obj, args.root)
+    except (StatusError, KeyError, RuntimeError, OSError) as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 2
+    return code
+
+
+def _refresh_changelog(obj: str, root: Path | None) -> None:
+    from tools.changelog import write_changelog
+    from tools.common.paths import status_path
+
+    if not status_path(obj, root).is_file():
+        return
+    path = write_changelog(obj, root)
+    sys.stdout.write(f"changelog  {path}\n")
 
 
 if __name__ == "__main__":

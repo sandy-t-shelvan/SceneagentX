@@ -142,4 +142,7 @@ def test_pipeline_rejects_later_block(tmp_path, monkeypatch):
     monkeypatch.setattr("tools.pipeline.run_colmap_orbit", lambda *args, **kwargs: 0)
     monkeypatch.setattr("tools.pipeline.run_splat_orbit", lambda *args, **kwargs: 0)
     monkeypatch.setattr("tools.pipeline.run_align", lambda *args, **kwargs: 0)
+    video = tmp_path / "data" / "marker" / "raw" / "orbit1.mp4"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"video")
     assert run("marker", through="B5", root=tmp_path) == 3
