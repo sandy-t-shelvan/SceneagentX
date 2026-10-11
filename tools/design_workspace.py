@@ -31,6 +31,9 @@ def build_workspace(obj: str, root: Path | None = None) -> dict[str, str]:
     cropped = _crop_object(obj, folder, root)
     if cropped is not None:
         written["object_ply"] = str(cropped)
+    from tools.orbit_blocks import apply_measured_records
+
+    apply_measured_records(obj, folder, root)
     return written
 
 
@@ -153,10 +156,43 @@ def _crop_object(obj: str, folder: Path, root: Path | None) -> Path | None:
     masks = _read(folder / "masks" / "object.json")
     name = str(masks.get("label") or obj)
     destination = folder / "objects" / name / "object.ply"
+    partial = destination.with_name("object.partial.ply")
     try:
-        stats = crop_splat(ply, np.load(mask_path), destination)
-    except (OSError, ValueError):
+        stats = crop_splat(ply, np.load(mask_path), partial)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as exc:
+        if partial.is_file():
+            partial.unlink()
+        if destination.is_file() and destination.stat().st_size > 0:
+            _dump(
+                destination.parent / "crop_error.json",
+                {
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "kept_existing_object_ply": True,
+                    "note": "crop_splat did not finish. The existing object.ply was kept and no Gaussians were invented.",
+                },
+            )
+            return destination
+        _dump(
+            destination.parent / "crop_report.json",
+            {
+                "block": "C",
+                "object": name,
+                "error": f"{type(exc).__name__}: {exc}",
+                "object_ply": None,
+                "floater_count": None,
+                "infill": "skipped",
+                "fine_tune": "not_run",
+                "m3_met": False,
+                "note": "crop_splat did not finish. object.ply was not invented.",
+            },
+        )
         return None
+    partial.replace(destination)
+    error_note = destination.parent / "crop_error.json"
+    if error_note.is_file():
+        error_note.unlink()
     _dump(
         folder / "objects" / name / "world_T_object.json",
         {

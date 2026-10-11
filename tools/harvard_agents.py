@@ -4,56 +4,83 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from tools.common.paths import object_dir
 
-SKILLS: tuple[dict[str, str], ...] = (
+SKILLS: tuple[dict[str, Any], ...] = (
     {
         "id": "SCENEAGENT-RUN-PIPELINE",
         "does": "Chooses the path from the input status",
         "ours": "choose_path returns ply, video, or stop. A ply never starts COLMAP.",
+        "allowed_params": [],
     },
     {
         "id": "SCENEAGENT-INGEST-DATA",
         "does": "COLMAP plus splatfacto-big for RGB, or accept a mesh or splat ply",
         "ours": "Video frames use sequential COLMAP. A passing report is kept and not rerun.",
+        "allowed_params": ["appearance_embedding"],
     },
     {
         "id": "SCENEAGENT-RUN-STEP",
         "does": "Masks, semantics, physics, crop, and infill, then a visual fix",
         "ours": "One skill runs, the file is checked, and the first fault restarts only that skill.",
+        "allowed_params": [
+            "box_threshold",
+            "text_prompt",
+            "span_ratio",
+            "k_parts",
+            "sugar_level",
+            "poisson_depth",
+            "stiffness",
+        ],
     },
     {
         "id": "SCENEAGENT-ALIGN-SCENE",
         "does": "Photometric, silhouette, and edge residuals",
         "ours": "Bounding-box scale. The three residuals stay skipped.",
+        "allowed_params": ["scale", "yaw_deg", "translation"],
     },
     {
         "id": "SCENEAGENT-ORIENT-BACKGROUND",
         "does": "Isaac Lab sweeps when a background splat exists",
         "ours": "Skipped. A skip is not Achieved.",
+        "allowed_params": ["roll_deg", "pitch_deg"],
     },
     {
         "id": "SCENEAGENT-PACKAGE-DATA-PROCESSED",
         "does": "USDZ for Isaac, MuJoCo, and Unreal",
         "ours": "A USDA zip. It is not loaded in a simulator.",
+        "allowed_params": [],
     },
     {
         "id": "SCENEAGENT-INSPECT-ISAAC",
         "does": "Renders the USDZ in Isaac and fixes what is wrong",
-        "ours": "Not run.",
+        "ours": "Not run until a real Isaac frame file exists.",
+        "allowed_params": ["scale", "yaw_deg", "translation"],
     },
     {
         "id": "SCENEAGENT-OBJECT-SISTERS",
         "does": "TRELLIS geometric and visual variations",
         "ours": "TRELLIS can write the meshes. This skill is not an agent.",
+        "allowed_params": [],
     },
     {
         "id": "SCENEAGENT-SCENE-SISTERS",
         "does": "New layouts of those sisters",
         "ours": "Layouts of whatever object files exist. Not an agent.",
+        "allowed_params": [],
     },
 )
+
+
+def allowed_params(skill_id: str) -> list[str]:
+    """Parameters iterate.py may write for this skill. Anything else is refused."""
+    for skill in SKILLS:
+        if skill["id"] == skill_id:
+            return list(skill["allowed_params"])
+    known = ", ".join(skill["id"] for skill in SKILLS)
+    raise KeyError(f"Unknown skill {skill_id!r}. Known skills: {known}")
 
 
 def write_agents(

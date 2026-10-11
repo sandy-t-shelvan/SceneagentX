@@ -3,7 +3,8 @@
 Measurements judge registration, reprojection, scale, and surface error.
 A vision model is asked only for what eyes have to judge. A retry that
 repeats the last try is refused. A worse measurement is thrown away.
-Two tries is the limit. The next step is one question, not a third try.
+Three retries is the limit, and each retry must change an allowed parameter.
+An unchanged retry stops. The next step is one question.
 This module does not start COLMAP for a ply, and it does not call CrewAI.
 """
 
@@ -24,12 +25,12 @@ import urllib.request
 from typing import Any, Callable
 
 from tools.common.paths import object_dir, renders_dir
-from tools.harvard_agents import write_agents
+from tools.harvard_agents import SKILLS, write_agents
 from tools.ingest import classify_input, colmap_refused
 from tools.review_step import REQUIRED, ReviewError, review_block
 from tools.video_input import find_video, record_absent
 
-MAX_FAULTS = 2
+MAX_RETRIES = 3
 MEASURED_BLOCKS = frozenset({"B0", "B1", "B2", "B3", "B4", "B8"})
 _VISION_MODEL = "gpt-6-astra"
 _VISION_URL = "https://api.openai.com/v1/chat/completions"
@@ -150,7 +151,7 @@ def run_skill(
             )
             return 2, saw_model
         faults += 1
-        restarted = faults < MAX_FAULTS
+        restarted = faults <= MAX_RETRIES
         _store_parameter(obj, block_id, new_parameter, root)
         _record_fault(
             obj,
@@ -164,7 +165,7 @@ def run_skill(
             ask_question(
                 obj,
                 block_id,
-                f"{block_id} used its two tries. What should change on the next try?",
+                f"{block_id} used its three retries. What should change on the next try?",
                 root,
             )
             _close(obj, root, saw_model)
@@ -181,8 +182,20 @@ def finish_route(obj: str, root: Path | None, visual_review: bool) -> None:
 def _close(obj: str, root: Path | None, visual_review: bool) -> None:
     write_agents(obj, root, ran=True, visual_review=True if visual_review else None)
     from tools.common.status import load_status
+    from tools.review_contract import write_report
 
-    load_status(obj, root, create=True)
+    doc = load_status(obj, root, create=True)
+    write_report(
+        object_dir(obj, root) / "report.json",
+        "partial",
+        {
+            "visual_review": bool(visual_review),
+            "learned_prior": False,
+            "gpu_minutes": doc.get("gpu_minutes"),
+        },
+        [],
+        [],
+    )
     from tools.changelog import write_changelog
 
     write_changelog(obj, root)
@@ -361,3 +374,137 @@ def _record_fault(
     from tools.changelog import write_changelog
 
     write_changelog(obj, root)
+
+
+class UnknownSkillError(ValueError):
+    """The planner named a skill id that is not in the allow-list."""
+
+
+_SKILL_BLOCK = {
+    "SCENEAGENT-INGEST-DATA": "B2",
+    "SCENEAGENT-RUN-STEP": "B5",
+    "SCENEAGENT-ALIGN-SCENE": "B4",
+    "SCENEAGENT-ORIENT-BACKGROUND": "B4",
+    "SCENEAGENT-PACKAGE-DATA-PROCESSED": "B12",
+    "SCENEAGENT-INSPECT-ISAAC": "B12",
+    "SCENEAGENT-OBJECT-SISTERS": "B13",
+    "SCENEAGENT-SCENE-SISTERS": "B14",
+    "SCENEAGENT-RUN-PIPELINE": "B16",
+}
+
+
+def accept_planner_skill(skill_id: str) -> str:
+    """Hard-rule allow-list. An unknown id is rejected before any program runs."""
+    known = {item["id"] for item in SKILLS}
+    if skill_id not in known:
+        raise UnknownSkillError(f"unknown skill id {skill_id}")
+    return skill_id
+
+
+def advance_once(
+    obj: str,
+    root: Path | None = None,
+    planner: Any = None,
+    runner: Callable[..., None] | None = None,
+) -> int:
+    """Advance exactly one skill. A ply never calls COLMAP. A second fault stops."""
+    route = choose_path(obj, root)
+    if route == "stop":
+        _write_once(obj, root, [], "not called", stopped="missing orbit1")
+        return 2
+    if planner is None:
+        skill_id = _local_planner(obj, root, route)
+    elif callable(planner):
+        skill_id = planner(obj, root)
+    else:
+        skill_id = str(planner)
+    skill_id = accept_planner_skill(skill_id)
+    run = runner or _default_runner
+    parameter: dict[str, Any] | None = None
+    for attempt in (1, 2):
+        try:
+            run(obj, skill_id, root, parameter)
+        except SkillFault as exc:
+            _record_fault(obj, _SKILL_BLOCK.get(skill_id, "B16"), attempt, str(exc), attempt == 1, root)
+            if attempt == 2:
+                ask_question(
+                    obj,
+                    _SKILL_BLOCK.get(skill_id, "B16"),
+                    f"{skill_id} failed twice. What should change on the next try?",
+                    root,
+                )
+                _write_once(obj, root, [skill_id], "not called" if route == "ply" else "not this turn")
+                return 2
+            parameter = {"box_threshold": 0.22} if "mask" in str(exc).lower() else {"attempt": attempt}
+            continue
+        _write_once(obj, root, [skill_id], "not called" if route == "ply" else "not this turn")
+        return 0
+    return 2
+
+
+def _local_planner(obj: str, root: Path | None, route: str) -> str:
+    path = object_dir(obj, root) / "masks" / "object.json"
+    if path.is_file():
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict) and loaded.get("corrupt") is True:
+            return "SCENEAGENT-RUN-STEP"
+    if route == "ply":
+        return "SCENEAGENT-PACKAGE-DATA-PROCESSED"
+    return "SCENEAGENT-RUN-STEP"
+
+
+def _default_runner(obj: str, skill_id: str, root: Path | None, parameter: dict[str, Any] | None) -> None:
+    """One local step. COLMAP and splat training are not called from here."""
+    if skill_id != "SCENEAGENT-RUN-STEP":
+        return
+    path = object_dir(obj, root) / "masks" / "object.json"
+    if not path.is_file():
+        return
+    loaded = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict) or loaded.get("corrupt") is not True:
+        return
+    if parameter and parameter.get("box_threshold") is not None:
+        loaded["corrupt"] = False
+        loaded["box_threshold"] = parameter["box_threshold"]
+        path.write_text(json.dumps(loaded, indent=2) + "\n", encoding="utf-8")
+        return
+    raise SkillFault("corrupted mask")
+
+
+def _write_once(
+    obj: str,
+    root: Path | None,
+    skills: list[str],
+    colmap: str,
+    stopped: str | None = None,
+) -> None:
+    folder = object_dir(obj, root)
+    folder.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {"skills": list(skills), "n_skills": len(skills), "colmap": colmap}
+    if stopped:
+        payload["stopped"] = stopped
+    (folder / "once.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Advance exactly one SceneAgent skill")
+    parser.add_argument("obj", nargs="?", default="bottle")
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--root", type=Path, default=None)
+    parser.add_argument("--skill", default=None)
+    args = parser.parse_args(argv)
+    if not args.once:
+        sys.stderr.write("pass --once to advance one skill\n")
+        return 2
+    planner = None if args.skill is None else (lambda _obj, _root, skill=args.skill: skill)
+    try:
+        return advance_once(args.obj, args.root, planner=planner)
+    except UnknownSkillError as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

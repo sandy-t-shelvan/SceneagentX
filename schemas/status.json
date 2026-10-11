@@ -17,6 +17,7 @@
       }
     },
     "setup_minutes": {"type": ["number", "null"], "minimum": 0},
+    "gpu_minutes": {"type": ["number", "null"], "minimum": 0},
     "steps": {
       "type": "array",
       "items": {"$ref": "#/$defs/step"}

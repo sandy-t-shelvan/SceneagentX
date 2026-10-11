@@ -1,0 +1,14 @@
+---
+description: How the repo changelog and the per-object run log are written
+alwaysApply: true
+---
+
+# Changelog
+
+A skipped check is never a pass. Nothing is retrained to make a number move.
+
+1. Every commit that touches `tools/` or `tests/` adds a bullet under `[Unreleased]` in the matching Added / Changed / Fixed heading, one line, naming the file.
+2. A block is closed by moving `[Unreleased]` into a `[block-NN] <date> — <name>` section with a Milestone subsection copied from `status.json` and a Tests subsection with the pytest counts. No block section without both.
+3. A Milestone line may only say "achieved" if the test that checks it is named in the Tests subsection and passed. Skipped, unstarted and `asked: false` are written as such.
+4. Never edit a closed block section; corrections go in a new `[Unreleased]` Fixed bullet that references the block.
+5. `tests/test_changelog.py` parses the file: it fails if `[Unreleased]` is non-empty at a block close, if a block section lacks Milestone or Tests, or if a Milestone says achieved for a gate whose artifact file is missing.

@@ -105,6 +105,27 @@ def _labels(match: Any) -> tuple[str, str]:
     return "Not yet", "no"
 
 
+def achieved_word(
+    match: Any,
+    *,
+    skipped: bool = False,
+    asked: bool | None = None,
+    kind: str = "",
+) -> str:
+    """Skipped work and asked: false are never written as Achieved."""
+    if asked is False:
+        return "Not yet"
+    if skipped and kind == "alignment":
+        return "Partial"
+    if skipped:
+        return "Not yet"
+    if match is True or match == "yes":
+        return "Achieved"
+    if match == "partial":
+        return "Partial"
+    return "Not yet"
+
+
 def _demote_skips(
     block_id: str,
     status_word: str,
@@ -112,7 +133,9 @@ def _demote_skips(
     folder: Path,
     status: dict[str, Any],
 ) -> tuple[str, str]:
-    """A skipped alignment or orientation is not Achieved."""
+    """A skipped alignment or orientation is not Achieved. asked: false is not Achieved."""
+    if _review_asked_false(folder, block_id):
+        return "Not yet", "no"
     if status_word != "Achieved":
         return status_word, harvard
     if block_id == "alignment" and _alignment_skipped(folder, status):
@@ -122,6 +145,62 @@ def _demote_skips(
     if block_id == "semantics" and _infill_skipped(folder):
         return "Partial", "partial"
     return status_word, harvard
+
+
+_REVIEW_KEYS = {
+    "inspector": ("inspect", "isaac"),
+    "semantics": ("see", "mask"),
+    "alignment": ("align",),
+    "orientation": ("orient",),
+    "physics": ("physics",),
+    "decomposition": ("parts",),
+    "articulation": ("joint", "motion"),
+    "package": ("package",),
+    "object_sisters": ("sister",),
+    "policy": ("policy",),
+}
+
+
+def _review_asked_false(folder: Path, block_id: str) -> bool:
+    keys = _REVIEW_KEYS.get(block_id, (block_id,))
+    reviews = folder / "reviews"
+    if reviews.is_dir():
+        for path in reviews.glob("*.json"):
+            if _file_asked_false(path, keys):
+                return True
+    runs = folder / "runs.jsonl"
+    if runs.is_file():
+        for line in runs.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            vision = row.get("vision_gate") if isinstance(row.get("vision_gate"), dict) else {}
+            skill = str(row.get("skill") or "")
+            if vision.get("asked") is False and any(key in skill.lower() for key in keys):
+                return True
+    return False
+
+
+def _file_asked_false(path: Path, keys: tuple[str, ...]) -> bool:
+    blob = path.name.lower()
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(loaded, dict):
+        return False
+    step = str(loaded.get("step") or "")
+    if not any(key in blob or key in step.lower() for key in keys):
+        return False
+    if loaded.get("asked") is False:
+        return True
+    vision = loaded.get("vision_gate")
+    return isinstance(vision, dict) and vision.get("asked") is False
 
 
 def _alignment_skipped(folder: Path, status: dict[str, Any]) -> bool:

@@ -84,19 +84,9 @@ def _block_a(obj: str, folder: Path, root: Path | None) -> dict[str, Any]:
     models = ["0"] if (folder / "colmap" / "orbit1" / "models.json").is_file() else []
     gates = evaluate_colmap(report, models, 0) if report else {}
     colmap_ok = bool(gates) and all(gates.values())
-    if ply.is_file() and colmap_ok:
-        state = "partial"
-        result = (
-            f"splat kept gaussians {count}; COLMAP not restarted; "
-            "PSNR and LPIPS were not measured, so M1 is not met"
-        )
-    elif ply.is_file():
-        state = "partial"
-        result = f"splat kept gaussians {count}; metric scale and held-out PSNR were not measured"
-    else:
-        state = "not_started"
-        result = "no scene splat"
-    return {"state": state, "result": result, "artifact": str(ply)}
+    from tools.orbit_blocks import score_a
+
+    return score_a(obj, folder, root, ply, count, colmap_ok)
 
 
 def _block_b(obj: str, folder: Path, root: Path | None) -> dict[str, Any]:
@@ -110,6 +100,7 @@ def _block_b(obj: str, folder: Path, root: Path | None) -> dict[str, Any]:
         result = (
             f"detections {masks.get('n_views_with_detection')}; "
             f"inside {masks.get('n_inside')}; one object vector; "
+            f"{(_read(folder / 'semantics' / 'instances.json').get('background') or {}).get('reason') or 'scene mean was not a separate measurement'}; "
             "LangSplat codebook and mIoU were not measured"
         )
     elif detected or encoded:
@@ -122,6 +113,11 @@ def _block_b(obj: str, folder: Path, root: Path | None) -> dict[str, Any]:
 
 
 def _block_c(obj: str, folder: Path, root: Path | None) -> dict[str, Any]:
+    from tools.orbit_blocks import score_c
+
+    scored = score_c(folder)
+    if scored is not None:
+        return scored
     masks = _read(folder / "masks" / "object.json")
     if masks.get("infill") == "ran" and (folder / "background.ply").is_file():
         state = "pass"
@@ -147,6 +143,7 @@ def _block_d(obj: str, folder: Path, root: Path | None) -> dict[str, Any]:
         state = "partial"
         result = (
             f"material {physics.get('material')}; mass_kg {physics.get('mass_kg')}; "
+            f"static_friction {physics.get('static_friction')}; drop_test {physics.get('drop_test') or 'not_run'}; "
             "learned_prior false; mass was not checked on a scale"
         )
     else:
@@ -159,9 +156,10 @@ def _block_e(obj: str, folder: Path, root: Path | None) -> dict[str, Any]:
     urdf = folder / "asset.urdf"
     text = urdf.read_text(encoding="utf-8") if urdf.is_file() else ""
     joints = text.count("<joint ")
+    chamfer_note = _status_chamfer_note(folder)
     if joints > 0:
         state = "partial"
-        result = f"{joints} URDF joints; Isaac did not sweep them; no deformable press"
+        result = f"{joints} URDF joints; Isaac did not sweep them; {chamfer_note}; no deformable press"
     elif urdf.is_file():
         state = "partial"
         result = "URDF is one body; joint review did not keep a moving part"
@@ -180,7 +178,10 @@ def _block_f(obj: str, folder: Path, root: Path | None) -> dict[str, Any]:
         result = f"Isaac frame {frame.name}; photometric alignment was not run"
     elif isaac:
         state = "partial"
-        result = f"Isaac check recorded; no RGB frame; reason {isaac.get('reason') or isaac.get('error') or 'reset did not finish'}"
+        result = (
+            "Isaac check recorded; no RGB frame; alignment stays skipped; "
+            f"reason {isaac.get('reason') or isaac.get('error') or 'reset did not finish'}"
+        )
     else:
         state = "not_started"
         result = "Isaac inspection has not run"
@@ -188,26 +189,22 @@ def _block_f(obj: str, folder: Path, root: Path | None) -> dict[str, Any]:
 
 
 def _block_g(obj: str, folder: Path, root: Path | None) -> dict[str, Any]:
-    sisters = _read(folder / "sisters" / "objects.json")
-    count = len(sisters.get("objects") or []) if isinstance(sisters.get("objects"), list) else 0
-    if count >= 9 and sisters.get("clip_gate") is True:
-        state = "pass"
-        result = f"{count} sisters passed the similarity gate"
-    elif count > 0:
-        state = "partial"
-        result = f"{count} sisters exist; the site asks for 9 and a CLIP gate, which was not measured"
-    else:
-        state = "not_started"
-        result = "no sisters"
-    return {"state": state, "result": result, "artifact": "sisters/objects.json"}
+    from tools.orbit_blocks import score_g
+
+    return score_g(folder)
 
 
 def _block_h(obj: str, folder: Path, root: Path | None) -> dict[str, Any]:
-    asked = bool(os.environ.get("OPENAI_API_KEY", "").strip()) and _first_frame(folder) is not None
+    frame = _first_frame(folder)
+    review = _read(folder / "semantics" / "instances.json").get("review_views")
+    has_picture = frame is not None or (isinstance(review, list) and len(review) > 0)
+    asked = bool(os.environ.get("OPENAI_API_KEY", "").strip()) and has_picture
     if asked:
-        result = "gpt-6-astra can review the saved frame; the skill swarm is file-state, not a second framework"
+        result = "gpt-6-astra can review the saved picture; the skill swarm is file-state, not a second framework"
+    elif not has_picture:
+        result = "orchestrator state written; no Isaac RGB frame, so the model was not asked"
     else:
-        result = "orchestrator state written; no review picture, so the model was not asked"
+        result = "orchestrator state written; a picture exists and the model was not asked"
     return {"state": "partial", "result": result, "artifact": "pipeline_state.json"}
 
 
@@ -221,6 +218,18 @@ def _block_j(obj: str, folder: Path, root: Path | None) -> dict[str, Any]:
 
 def _block_k(obj: str, folder: Path, root: Path | None) -> dict[str, Any]:
     return {"state": "not_started", "result": "VLA finetune and real-robot trials were not run", "artifact": ""}
+
+
+def _status_chamfer_note(folder: Path) -> str:
+    status = _read(folder / "status.json")
+    for step in status.get("steps") or []:
+        if not isinstance(step, dict) or step.get("id") != "B8":
+            continue
+        actual = step.get("actual") if isinstance(step.get("actual"), dict) else {}
+        chamfer = actual.get("chamfer_cm")
+        if isinstance(chamfer, (int, float)) and not isinstance(chamfer, bool):
+            return f"existing status chamfer_cm {chamfer}; F1 was not in a mesh score file"
+    return "no mesh score file; chamfer and F1 were not recorded"
 
 
 def _first_frame(folder: Path) -> Path | None:

@@ -18,13 +18,14 @@ if str(_ROOT) not in sys.path:
 
 import argparse
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 
 from tools.common.blocks import BLOCKS, get_block
-from tools.common.paths import schema_path, status_path
+from tools.common.paths import object_dir, schema_path, status_path
 
 STATES = ("not_started", "running", "pass", "fail")
 
@@ -39,6 +40,7 @@ def default_status(obj: str) -> dict[str, Any]:
         "object": obj,
         "ground_truth": {"length_m": None},
         "setup_minutes": None,
+        "gpu_minutes": None,
         "steps": [
             {
                 "id": block.id,
@@ -207,6 +209,36 @@ def finish_step(
         step["actual"] = actual
     save_status(obj, doc, root)
     return doc
+
+
+_RUN_FIELDS = (
+    "ts",
+    "object",
+    "skill",
+    "try",
+    "host",
+    "outputs",
+    "measure_gate",
+    "vision_gate",
+    "correction",
+    "kept",
+)
+
+
+def append_run(obj: str, entry: dict[str, Any], root: Path | None = None) -> Path:
+    """Append one runs.jsonl line. This does not write status.json."""
+    missing = [key for key in _RUN_FIELDS if key not in entry]
+    if missing:
+        raise StatusError("runs.jsonl entry missing " + ", ".join(missing))
+    path = object_dir(obj, root) / "runs.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry) + "\n")
+    return path
+
+
+def run_timestamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def parse_value(text: str) -> Any:

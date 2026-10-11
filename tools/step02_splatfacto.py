@@ -56,10 +56,12 @@ def parse_eval(text: str) -> dict[str, float | None]:
         return {
             "psnr": _number(results.get("psnr")),
             "ssim": _number(results.get("ssim")),
+            "lpips": _number(results.get("lpips") if results.get("lpips") is not None else results.get("lpips_vgg")),
         }
     return {
         "psnr": _search_float(text, r"psnr[^0-9]{0,12}(\d+(?:\.\d+)?)"),
         "ssim": _search_float(text, r"ssim[^0-9]{0,12}(\d+(?:\.\d+)?)"),
+        "lpips": _search_float(text, r"lpips[^0-9]{0,12}(\d+(?:\.\d+)?)"),
     }
 
 

@@ -353,6 +353,9 @@ def _physics(obj: str, root: Path | None) -> None:
     }
     if used_vlm:
         record["model"] = _VISION_MODEL
+    from tools.orbit_blocks import extend_physics_record
+
+    extend_physics_record(record)
     path = object_dir(obj, root) / "physics.json"
     path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     _write_gaussian_variation(obj, root, friction, rigidity)
@@ -936,6 +939,7 @@ def _usda(
         "        bool physics:learned_prior = false\n"
         "        bool physics:heterogeneous_rigidity = false\n"
         '        string physics:vlm_review = "not_run"\n'
+        f"{_usd_physics_notes(physics)}"
         "    }\n"
         ")\n"
         "{\n"
@@ -949,6 +953,24 @@ def _usda(
         "    }\n"
         "}\n"
     )
+
+
+def _usd_physics_notes(physics: dict[str, Any]) -> str:
+    """Bake stored friction numbers. learned_prior stays false in the caller."""
+    lines = ['        string physics:dropTest = "not_run"']
+    static = physics.get("static_friction")
+    if isinstance(static, (int, float)) and not isinstance(static, bool):
+        lines.insert(0, f"        float physics:staticFriction = {static}")
+    dynamic = physics.get("dynamic_friction")
+    if isinstance(dynamic, (int, float)) and not isinstance(dynamic, bool):
+        lines.append(f"        float physics:dynamicFriction = {dynamic}")
+    restitution = physics.get("restitution")
+    if isinstance(restitution, (int, float)) and not isinstance(restitution, bool):
+        lines.append(f"        float physics:restitution = {restitution}")
+    kind = physics.get("deformable_type")
+    if isinstance(kind, str) and kind in {"rigid", "cloth", "rope", "soft"}:
+        lines.append(f'        string physics:deformableType = "{kind}"')
+    return "\n".join(lines) + "\n"
 
 
 def _ident(name: str) -> str:

@@ -165,6 +165,89 @@ def test_the_same_try_asks_one_question(tmp_path: Path):
     assert "change" in first["question"].lower()
 
 
+def test_three_changed_retries_then_one_question(tmp_path: Path):
+    calls = []
+    folder = tmp_path / "data" / "scan" / "masks"
+    folder.mkdir(parents=True)
+
+    def run_once(parameter):
+        calls.append(None if not parameter else parameter.get("box_threshold"))
+        (folder / "object.json").write_text("{}\n", encoding="utf-8")
+
+    def checker(obj, block_id, root):
+        return {
+            "decision": "restart",
+            "called": False,
+            "fault": "change the threshold",
+            "parameter": {"box_threshold": round(0.2 + 0.1 * len(calls), 2), "retrain": True},
+        }
+
+    code, visual = run_skill("scan", "B5", run_once, tmp_path, checker)
+    assert code == 2
+    assert visual is False
+    assert calls == [None, 0.3, 0.4, 0.5]
+    question = json.loads((tmp_path / "data" / "scan" / "question.json").read_text(encoding="utf-8"))
+    assert question["block"] == "B5"
+    report = json.loads((tmp_path / "data" / "scan" / "report.json").read_text(encoding="utf-8"))
+    assert report["metrics"]["learned_prior"] is False
+    assert report["metrics"]["gpu_minutes"] is None
+
+
+def test_corrupt_mask_restarts_only_that_skill(tmp_path: Path, monkeypatch):
+    trained = {"n": 0}
+
+    def refuse(*args, **kwargs):
+        trained["n"] += 1
+        raise AssertionError("retrain")
+
+    monkeypatch.setattr("tools.step02_splatfacto._train", refuse)
+    monkeypatch.setattr("tools.step01_colmap.run_orbit", refuse)
+    folder = tmp_path / "data" / "scan" / "masks"
+    folder.mkdir(parents=True)
+    mask = folder / "object.json"
+    mask.write_text(
+        json.dumps({"prompt": "camera.", "projected": True, "infill": "skipped", "corrupt": True}),
+        encoding="utf-8",
+    )
+
+    def run_once(parameter):
+        if parameter and parameter.get("box_threshold") == 0.22:
+            mask.write_text(
+                json.dumps(
+                    {
+                        "prompt": "camera.",
+                        "projected": True,
+                        "infill": "skipped",
+                        "corrupt": False,
+                        "box_threshold": 0.22,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+    def checker(obj, block_id, root):
+        current = json.loads(mask.read_text(encoding="utf-8"))
+        if current.get("corrupt") is True:
+            return {
+                "decision": "restart",
+                "called": False,
+                "fault": "bad mask",
+                "parameter": {"box_threshold": 0.22, "retrain": True},
+            }
+        return {"decision": "pass", "called": False}
+
+    code, _visual = run_skill("scan", "B5", run_once, tmp_path, checker)
+    assert code == 0
+    assert trained["n"] == 0
+    saved = json.loads(mask.read_text(encoding="utf-8"))
+    assert saved["corrupt"] is False
+    assert saved["box_threshold"] == 0.22
+    agents = json.loads((tmp_path / "data" / "scan" / "agents.json").read_text(encoding="utf-8"))
+    assert agents["faults"]
+    assert {item["block"] for item in agents["faults"]} == {"B5"}
+    assert not (tmp_path / "data" / "scan" / "question.json").exists()
+
+
 def test_measurements_do_not_call_the_model(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     picture = tmp_path / "data" / "scan" / "renders" / "synthetic"
