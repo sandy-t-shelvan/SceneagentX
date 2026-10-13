@@ -187,6 +187,15 @@ def _http_post(url: str, payload: dict[str, Any], api_key: str, timeout: int = 1
         with urllib.request.urlopen(request, timeout=timeout) as response:
             parsed = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")
+        if (
+            exc.code == 400
+            and "temperature" in body
+            and "temperature" in payload
+        ):
+            retry = dict(payload)
+            retry.pop("temperature", None)
+            return _http_post(url, retry, api_key, timeout)
         raise VlmError(f"vision HTTP {exc.code}") from exc
     except urllib.error.URLError as exc:
         raise VlmError("vision request failed") from exc
