@@ -178,7 +178,9 @@ def main() -> None:
     UsdGeom.SetStageMetersPerUnit(stage, 1.0)
     light = UsdLux.DomeLight.Define(stage, "/World/Light")
     light.CreateIntensityAttr(400.0)
-    _color_cube(stage)
+    # The blue preview shader is only for the untextured cube. scene.usda keeps its own look.
+    if Path(args.usda).name == "cube.usda":
+        _color_cube(stage)
     camera = UsdGeom.Camera.Define(stage, "/World/Camera")
     width = int(pose["width"]) if args.width <= 0 else int(args.width)
     height = int(pose["height"]) if args.height <= 0 else int(args.height)

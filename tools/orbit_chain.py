@@ -502,7 +502,7 @@ def _object_dir_writers(
     d2_status = "model not asked"
     try:
         prior_status = write_prior_input("can", root, ply=splat, vectors=vectors)
-        d2_status = start_d2("can", frames, "can", bbox, root=root, api_key="")
+        d2_status = start_d2("can", frames, "can", bbox, root=root)
         _copy_produced(produced, chain)
     finally:
         if root.exists():

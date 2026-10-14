@@ -264,7 +264,8 @@ def start_d2(
     if obj == "vaseline":
         raise GateError("start_d2 refuses vaseline")
     path = object_dir(obj, root) / "physics.json"
-    key = (api_key if api_key is not None else os.environ.get("OPENAI_API_KEY", "")).strip()
+    explicit = (api_key or "").strip()
+    key = explicit or os.environ.get("OPENAI_API_KEY", "").strip()
     existing = [Path(frame) for frame in frames if Path(frame).is_file()]
     if len(existing) != 4:
         return "model not asked"

@@ -73,12 +73,14 @@ def test_no_api_key_does_not_write_physics(tmp_path: Path, monkeypatch: pytest.M
 
     def wrap(*args, **kwargs):
         seen["api_key"] = kwargs.get("api_key")
+        seen["api_key_passed"] = "api_key" in kwargs
         seen["root"] = kwargs.get("root")
         return real(*args, **kwargs)
 
     monkeypatch.setattr(oc, "start_d2", wrap)
     result = oc.run_orbit(can, "orbit1", tmp_path / "orbit_chain.md")
-    assert seen["api_key"] == ""
+    assert seen["api_key_passed"] is False
+    assert seen["api_key"] is None
     root = Path(seen["root"]).resolve()
     chain = (can / "chain").resolve()
     assert chain == root or chain in root.parents
@@ -88,6 +90,44 @@ def test_no_api_key_does_not_write_physics(tmp_path: Path, monkeypatch: pytest.M
     assert list(can.rglob("gaussian_physics.npy")) == []
     assert (can / "ingest" / "block_d.json").read_text(encoding="utf-8") == '{"achieved": false, "sentinel": true}\n'
     assert (can / "asset.urdf").read_text(encoding="utf-8") == "sentinel-urdf\n"
+
+
+def test_present_key_is_not_discarded_by_empty_string(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    token = "present-test-key"
+    monkeypatch.setenv("OPENAI_API_KEY", token)
+    can = _can(tmp_path)
+    for parts in oc._D2_FRAMES:
+        frame = can.joinpath(*parts)
+        frame.parent.mkdir(parents=True, exist_ok=True)
+        frame.write_bytes(b"frame")
+    seen: dict = {}
+    real = oc.start_d2
+
+    def wrap(*args, **kwargs):
+        seen["api_key"] = kwargs.get("api_key")
+        seen["api_key_passed"] = "api_key" in kwargs
+        return real(*args, **kwargs)
+
+    def fake_ask(frames, name, bbox, api_key):
+        seen["asked_key"] = api_key
+        seen["name"] = name
+        seen["frames"] = len(frames)
+        raise OSError("stop before a network write")
+
+    def block_network(*_args, **_kwargs):
+        raise AssertionError("D2 test must not open a network request")
+
+    monkeypatch.setattr(oc, "start_d2", wrap)
+    monkeypatch.setattr("tools.block_d._ask_start_d2", fake_ask)
+    monkeypatch.setattr("urllib.request.urlopen", block_network)
+    result = oc.run_orbit(can, "orbit1", tmp_path / "present.md")
+    assert seen["api_key_passed"] is False
+    assert seen["api_key"] != ""
+    assert seen["asked_key"] == token
+    assert seen["name"] == "can"
+    assert seen["frames"] == 4
+    assert result["d"]["d2_status"] == "response not usable"
+    assert list(can.rglob("physics.json")) == []
 
 
 def test_no_splat_does_not_write_mesh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

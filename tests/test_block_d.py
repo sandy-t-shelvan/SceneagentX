@@ -137,6 +137,30 @@ def test_d2_no_key_does_not_write_invented_mass(tmp_path: Path, monkeypatch: pyt
     status = start_d2("can", frames, "can", bbox, root=tmp_path, api_key="")
     assert status == "model not asked"
     assert not (tmp_path / "data" / "can" / "physics.json").is_file()
+    omitted = start_d2("can", frames, "can", bbox, root=tmp_path)
+    assert omitted == "model not asked"
+    assert not (tmp_path / "data" / "can" / "physics.json").is_file()
+
+
+def test_d2_empty_string_does_not_discard_env_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    token = "present-test-key"
+    monkeypatch.setenv("OPENAI_API_KEY", token)
+    frames = [_tiny_png(tmp_path / f"kept_{index}.png") for index in range(4)]
+    bbox = {"span_inside": 0.55, "span_scene": 9.2, "metres_per_unit": None}
+    seen: dict = {}
+
+    def ask(existing, name, bbox_arg, key):
+        seen["key"] = key
+        seen["name"] = name
+        seen["frames"] = len(existing)
+        raise OSError("stop before a write")
+
+    status = start_d2("can", frames, "can", bbox, root=tmp_path, ask=ask, api_key="")
+    assert seen["key"] == token
+    assert seen["name"] == "can"
+    assert seen["frames"] == 4
+    assert status == "response not usable"
+    assert not (tmp_path / "data" / "can" / "physics.json").is_file()
 
 
 def test_d2_parsed_fixture_schema_mass_unchecked(tmp_path: Path):

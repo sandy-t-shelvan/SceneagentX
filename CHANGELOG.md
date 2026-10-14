@@ -9,6 +9,10 @@
 - tests/test_block_d.py: refresh_block_d stays not_started until physics.json has material and mass_kg
 
 ### Fixed
+- tools/orbit_chain.py: start_d2 reads OPENAI_API_KEY instead of an empty api_key override
+- tools/block_d.py: a blank api_key does not discard OPENAI_API_KEY or invent a mass
+- tests/test_orbit_chain.py: a missing key still skips D2, and a present key is not discarded by an empty api_key string
+- tests/test_block_d.py: an empty api_key string does not discard a present OPENAI_API_KEY
 - tools/orbit_chain.py: Block D stays not_started unless physics.json has material and mass_kg
 - tools/block_f.py: an inspect with no telemetry says Isaac was not run; sim.reset is only a timeout
 - tools/orbit_chain.py: F1 names each missing input (mesh, capture, mask, world_T, intrinsics) instead of blaming only Block C
