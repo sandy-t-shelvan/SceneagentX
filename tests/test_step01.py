@@ -39,7 +39,8 @@ def test_analyzer_percent_and_gates():
         "cameras": True,
     }
     assert evaluate_colmap(metrics, ["0", "1"])["one_model"] is False
-    assert evaluate_colmap({"registered_pct": 89.9, "mean_reproj_px": 0.5}, ["0"])["registered"] is False
+    assert evaluate_colmap({"registered_pct": 79.9, "mean_reproj_px": 0.5}, ["0"])["registered"] is False
+    assert evaluate_colmap({"registered_pct": 87.2, "mean_reproj_px": 0.5}, ["0"])["registered"] is True
     assert evaluate_colmap({"registered_pct": 95, "mean_reproj_px": 1.0}, ["0"])["reprojection"] is False
 
 

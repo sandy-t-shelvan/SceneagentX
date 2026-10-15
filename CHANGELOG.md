@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Changed
+- tools/step01_colmap.py: registration passes at 80 percent of extracted frames
+- tools/can_block_b_check.py: the same 80 percent registration line as step01
+- tests/test_step01.py: 87.2 percent registers as a pass and 79.9 percent stays a fail
 - tools/block_e.py: say which of splat.ply or gaussian_in_mask.npy is missing when the mesh is not written
 - tests/test_orbit_chain.py: a missing splat with the mask on disk keeps Block E not_started
 - tests/test_orbit_chain.py: measured D1 steps stay unachieved and do not mark Block D partial without physics.json

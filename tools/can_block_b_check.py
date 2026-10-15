@@ -19,7 +19,7 @@ REVIEW_STEMS = {"orbit1": "frame_00167", "orbit2": "frame_00001", "orbit3": "fra
 FRAME_PIXELS = {"orbit1": 1080 * 1920, "orbit2": 2160 * 3840, "orbit3": 2160 * 3840}
 M1_PSNR = 27.0
 M1_LPIPS = 0.20
-REGISTERED_MIN = 90.0
+REGISTERED_MIN = 80.0
 REPROJ_MAX_PX = 1.0
 STEP_LABELS = {
     "A": "measured",

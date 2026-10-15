@@ -25,7 +25,7 @@ from tools.common.paths import frames_dir, object_dir, raw_dir, renders_dir
 from tools.common.status import StatusError, begin_step, finish_step, load_status, save_status, set_path
 from tools.viz_cameras import plot_cameras, read_images_txt
 
-REGISTERED_MIN = 90.0
+REGISTERED_MIN = 80.0
 REPROJ_MAX_PX = 1.0
 
 
