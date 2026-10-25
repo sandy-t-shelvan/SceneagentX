@@ -50,6 +50,50 @@ def test_runner_calls_d_then_e_then_f(tmp_path: Path, monkeypatch: pytest.Monkey
     assert index.tolist() == [0, -1, 0, -1]
 
 
+def test_refused_crop_is_measured_and_not_achieved():
+    record = oc._c_from_row(
+        "orbit2",
+        {
+            "state": "measured",
+            "crop": "refused",
+            "infill": "not_run",
+            "m3_met": False,
+            "n_inside": 32436,
+            "n_outside": 117427,
+            "covers_room": True,
+            "feature_field": "refused",
+            "note": "Mask covers the room. The crop was not written. It is not a pass.",
+        },
+    )
+    assert record["state"] == "measured"
+    assert record["achieved"] is False
+    part = record["parts"][0]
+    assert part["state"] == "measured"
+    assert part["achieved"] is False
+    assert part["numbers"]["n_inside"] == 32436
+    assert part["numbers"]["n_outside"] == 117427
+    assert part["numbers"]["crop"] == "refused"
+    assert "not a pass" in part["reason"]
+
+
+def test_object_only_skipped_infill_is_not_a_pass():
+    record = oc._c_from_row(
+        "orbit1",
+        {
+            "state": "measured",
+            "crop": "object_only",
+            "infill": "skipped",
+            "object_ply": "objects/bottle/orbit1/object.ply",
+            "m3_met": False,
+            "note": "Infill skipped. The object is the scene. It is not a pass.",
+        },
+    )
+    assert record["state"] == "measured"
+    assert record["achieved"] is False
+    assert record["parts"][0]["achieved"] is False
+    assert "not a pass" in record["parts"][0]["reason"]
+
+
 def test_c_is_skipped_and_not_achieved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     can = _can(tmp_path)
@@ -259,6 +303,70 @@ def test_hulls_and_deformable_type_are_required_before_partial(tmp_path: Path):
     assert oc._f_block_state(folder, [oc._step("F1", "partial", False, {}, "looks partial")]) == "partial"
 
 
+def test_d13_missing_vectors_does_not_say_no_splat(tmp_path: Path):
+    chain = tmp_path / "orbit2"
+    chain.mkdir()
+    part = oc._d13_part(chain, {"state": "unstarted", "reason": "assigned vectors are missing"})
+    assert part["state"] == "unstarted"
+    assert part["achieved"] is False
+    assert part["numbers"]["prior_input"] is False
+    assert "No splat" not in part["reason"]
+    assert "scene-mean" in part["reason"]
+    assert "assigned vectors are missing" in part["reason"]
+    missing = oc._d13_part(
+        chain,
+        {"state": "unstarted", "reason": "splat.ply is missing; geometry was not invented"},
+    )
+    assert missing["reason"] == "splat.ply is missing; geometry was not invented"
+    assert missing["reason"] != "No splat, so prior_input.npy was not written."
+
+
+def test_f1_copies_c1_world_pose(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    can = _can(tmp_path)
+    source = can / "objects" / "can" / "orbit1" / "world_T_object.json"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        json.dumps(
+            {
+                "translation": [1.0, 2.0, 3.0],
+                "rotation_wxyz": [1.0, 0.0, 0.0, 0.0],
+                "scale": 1.0,
+                "achieved": True,
+                "iou": 0.99,
+            }
+        ),
+        encoding="utf-8",
+    )
+    orbit_background = can / "background" / "orbit2" / "background.ply"
+    orbit_background.parent.mkdir(parents=True)
+    orbit_background.write_bytes(b"ply")
+    chain = can / "chain" / "orbit1"
+    chain.mkdir(parents=True)
+    assert oc._orbit_background(can, "orbit2", chain) == orbit_background
+    fresh = can / "chain" / "orbit3"
+    fresh.mkdir(parents=True)
+    other = can / "objects" / "can" / "orbit3" / "world_T_object.json"
+    other.parent.mkdir(parents=True)
+    other.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    found = oc.copy_c1_pose(can, "orbit3", fresh)
+    assert found == fresh / "world_T_object.json"
+    assert not (fresh / "align.json").exists()
+    assert not (chain / "world_T_object.json").exists()
+    result = oc.run_block_f(can, "orbit1", chain)
+    f1 = next(part for part in result["record"]["parts"] if part["id"] == "F1")
+    assert f1["numbers"]["world_T_object"] == "present"
+    assert "world_T_object" not in f1["numbers"]["missing"].split(",")
+    assert f1["achieved"] is False
+    assert f1["numbers"]["iou"] is None
+    assert "world_T_object is missing" not in f1["reason"]
+    assert not (chain / "align.json").exists()
+    saved = json.loads((chain / "world_T_object.json").read_text(encoding="utf-8"))
+    assert saved["translation"] == [1.0, 2.0, 3.0]
+    assert result["record"]["achieved"] is False
+    assert oc.copy_c1_pose(can, "orbit1", chain) == chain / "world_T_object.json"
+
+
 def test_measured_d1_does_not_start_block_d(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     can = _can(tmp_path)
@@ -279,6 +387,8 @@ def test_measured_d1_does_not_start_block_d(tmp_path: Path, monkeypatch: pytest.
     assert parts["D1.3"]["numbers"]["prior_input"] is False
     assert parts["D1.4"]["state"] == "unstarted"
     assert parts["D1.4"]["numbers"]["checkpoint"] is False
+    assert parts["D1.4"]["numbers"]["prior_input"] is False
+    assert "no prior_input" in parts["D1.4"]["reason"]
     assert parts["D1.5"]["state"] == "unstarted"
     assert parts["D1.5"]["numbers"]["reduced"] is False
     assert parts["D2"]["state"] == "unstarted"
@@ -298,6 +408,23 @@ def test_measured_d1_does_not_start_block_d(tmp_path: Path, monkeypatch: pytest.
     text = md.read_text(encoding="utf-8")
     assert "Block D state `not_started` achieved: false." in text
     assert "Block D state `partial`" not in text
+
+
+def test_d14_keeps_a_present_prior_file(tmp_path: Path):
+    can = _can(tmp_path)
+    chain = can / "chain" / "orbit1"
+    chain.mkdir(parents=True)
+    prior = chain / "semantics" / "prior_input.npy"
+    prior.parent.mkdir(parents=True)
+    np.save(prior, np.zeros((2, 40), dtype=np.float64))
+    part = oc._run_d14(can, chain, None)["part"]
+    assert part["state"] == "unstarted"
+    assert part["achieved"] is False
+    assert part["numbers"]["prior_input"] is True
+    assert part["numbers"]["checkpoint"] is False
+    assert part["numbers"]["learned_prior"] is False
+    assert "no prior_input" not in part["reason"]
+    assert "checkpoint is missing" in part["reason"]
 
 
 def test_d12_labels_follow_a_separate_scene_mean(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -358,6 +485,49 @@ def test_block_d_partial_only_with_material_and_mass(tmp_path: Path, monkeypatch
     text = (tmp_path / "filled.md").read_text(encoding="utf-8")
     assert "Block D state `partial` achieved: false." in text
     assert "achieved: true" not in text
+
+
+def test_relaxed_bake_passes_when_ply_rows_match(tmp_path: Path):
+    can = _can(tmp_path)
+    orbit = can / "objects" / "can" / "orbit1"
+    orbit.mkdir(parents=True)
+    (orbit / "object.ply").write_text("ply\nformat ascii 1.0\nelement vertex 4\nend_header\n", encoding="utf-8")
+    chain = can / "chain" / "orbit1"
+    (chain / "semantics").mkdir(parents=True)
+    np.save(chain / "semantics" / "prior_input.npy", np.zeros((4, 40), dtype=np.float64))
+    (chain / "physics.json").write_text(
+        json.dumps(
+            {
+                "material": "aluminum",
+                "mass_kg": 0.016,
+                "static_friction": 0.3,
+                "rigidity": 0.85,
+                "learned_prior": False,
+                "mass_check": {"checked": False, "reason": "not weighed"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    records = oc.run_block_d_from_block_c(can, ("orbit1",))
+    record = records[0]
+    assert record["achieved"] is True
+    assert record["m4_met"] is False
+    assert record["learned_prior"] is False
+    assert record["bake"]["ply_vertices"] == 4
+    assert record["bake"]["prior_rows"] == 4
+    assert record["bake"]["mass_checked"] is False
+    assert record["bake"]["settle_within_2s"] is None
+    parts = {part["id"]: part for part in record["parts"]}
+    assert parts["D1.3"]["achieved"] is True
+    assert parts["D2"]["achieved"] is True
+    assert parts["D3"]["achieved"] is True
+    assert parts["D1.4"]["achieved"] is False
+    assert parts["M4"]["achieved"] is False
+    short = can / "objects" / "can" / "orbit1" / "object.ply"
+    short.write_text("ply\nformat ascii 1.0\nelement vertex 2\nend_header\n", encoding="utf-8")
+    missed = oc.run_block_d_from_block_c(can, ("orbit1",))[0]
+    assert missed["achieved"] is False
+    assert missed["m4_met"] is False
 
 
 def test_refuses_bottle_and_vaseline(tmp_path: Path):

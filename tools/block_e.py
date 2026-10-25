@@ -12,6 +12,7 @@ import argparse
 import json
 import math
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -69,12 +70,34 @@ def filter_object_gaussians(
     return _filter_report(points, keep, mask, alpha, outside=outside, low=low)
 
 
-def poisson_mesh(points: np.ndarray, normals: np.ndarray | None, depth: int = 8) -> Any:
+def contact_points(points: np.ndarray, n: int = 4) -> np.ndarray:
+    """Grid on the lowest Z of the cloud. That plane is the unobserved contact face."""
+    cloud = np.asarray(points, dtype=np.float64)[:, :3]
+    z_value = float(cloud[:, 2].min())
+    x0, x1 = float(cloud[:, 0].min()), float(cloud[:, 0].max())
+    y0, y1 = float(cloud[:, 1].min()), float(cloud[:, 1].max())
+    if x1 <= x0:
+        x1 = x0 + 1e-4
+    if y1 <= y0:
+        y1 = y0 + 1e-4
+    xs = np.linspace(x0, x1, int(n))
+    ys = np.linspace(y0, y1, int(n))
+    return np.array([[x, y, z_value] for x in xs for y in ys], dtype=np.float64)
+
+
+def poisson_mesh(
+    points: np.ndarray,
+    normals: np.ndarray | None,
+    depth: int = 8,
+    planar_prior: bool = False,
+) -> Any:
     """Open3D Poisson. Missing points or a failed reconstruct returns no mesh."""
     cloud = np.asarray(points, dtype=np.float64) if points is not None else np.zeros((0, 3))
     if cloud.ndim != 2 or cloud.shape[0] < 4 or cloud.shape[1] < 3:
         return None
     cloud = cloud[:, :3]
+    if planar_prior and normals is None and np.isfinite(cloud).all():
+        cloud = np.vstack([cloud, contact_points(cloud)])
     if not np.isfinite(cloud).all():
         return None
     try:
@@ -155,6 +178,27 @@ def score_mesh(
         gated["achieved"] = False
         gated["achieved_reason"] = "chamfer or F1 is outside the gate, or the mesh is missing"
     return gated
+
+
+def write_planar_uv(mesh: Any) -> dict[str, Any]:
+    """Write XY UVs in the mesh bbox. Vertex colour alone does not start an atlas."""
+    result: dict[str, Any] = {"uv_atlas": "unstarted", "n_uv": 0}
+    vertices = _vertices_of(mesh)
+    if vertices is None or len(vertices) < 3 or not np.isfinite(vertices).all():
+        return result
+    low = vertices.min(axis=0)
+    span = np.maximum(vertices.max(axis=0) - low, 1e-8)
+    uvs = np.column_stack(((vertices[:, 0] - low[0]) / span[0], (vertices[:, 1] - low[1]) / span[1]))
+    if isinstance(mesh, dict):
+        mesh["uvs"] = uvs
+    else:
+        try:
+            mesh.triangle_uvs = uvs
+        except Exception:
+            return result
+    result["uv_atlas"] = "planar"
+    result["n_uv"] = int(len(uvs))
+    return result
 
 
 def write_vertex_colors(mesh: Any, colours: np.ndarray | None) -> dict[str, Any]:
@@ -256,6 +300,7 @@ def collision_hulls(mesh: Any, max_hulls: int = 32) -> dict[str, Any]:
         }
     summary = dict(convex_hull_summary(vertices))
     summary["coacd"] = False
+    summary["vhacd"] = False
     summary["max_hulls"] = cap
     if summary.get("convex_hull") == "built":
         summary["method"] = "trimesh"
@@ -482,16 +527,46 @@ def ftetwild_binary() -> str | None:
 
 def soft_volume(mesh: Any) -> dict[str, Any]:
     """Tetrahedralise only when fTetWild is already installed. A missing binary raises."""
-    del mesh
     binary = ftetwild_binary()
     if not binary:
         raise GateError("fTetWild is absent")
+    vertices, faces = _mesh_arrays(mesh)
+    if vertices is None or faces is None or len(faces) == 0:
+        return {
+            "route": "soft",
+            "ftetwild": True,
+            "binary": binary,
+            "ran": False,
+            "reason": "mesh has no triangles, so fTetWild was not run",
+        }
+    scratch = Path(tempfile.mkdtemp(prefix="block-e-tet-"))
+    source = scratch / "in.ply"
+    dest = scratch / "out.ply"
+    try:
+        write_xyz_ply(source, vertices)
+        completed = subprocess.run(
+            [binary, "-i", str(source), "-o", str(dest)],
+            check=False,
+            capture_output=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        shutil.rmtree(scratch, ignore_errors=True)
+        return {
+            "route": "soft",
+            "ftetwild": True,
+            "binary": binary,
+            "ran": False,
+            "reason": f"fTetWild did not finish: {type(exc).__name__}",
+        }
+    ran = completed.returncode == 0 and dest.is_file() and dest.stat().st_size > 0
+    shutil.rmtree(scratch, ignore_errors=True)
     return {
         "route": "soft",
         "ftetwild": True,
         "binary": binary,
-        "ran": False,
-        "reason": "fTetWild is on PATH; tetrahedralise was not launched",
+        "ran": ran,
+        "reason": None if ran else f"fTetWild exited {completed.returncode}",
     }
 
 
@@ -555,13 +630,14 @@ def extract_object_mesh(splat: Path, mask: Path, dest: Path) -> dict[str, Any]:
     kept = filtered["xyz"]
     if len(kept) < 4:
         return {**unstarted, "reason": "filter kept too few gaussians", "filter": _jsonable_filter(filtered)}
-    mesh = poisson_mesh(kept, None)
+    mesh = poisson_mesh(kept, None, planar_prior=True)
     if mesh is None:
         return {**unstarted, "reason": "poisson did not produce a mesh", "filter": _jsonable_filter(filtered)}
     colours = _kept_colours(splat, filtered["keep"])
     if colours is not None:
         baked = _bake_nearest(np.asarray(mesh.vertices), kept, colours)
         write_vertex_colors(mesh, baked)
+    atlas = write_planar_uv(mesh)
     written = _write_triangle_mesh(dest, mesh)
     if written is None:
         if dest.is_file():
@@ -571,7 +647,8 @@ def extract_object_mesh(splat: Path, mask: Path, dest: Path) -> dict[str, Any]:
         "state": "written",
         "achieved": False,
         "mesh": str(written),
-        "uv_atlas": "unstarted",
+        "uv_atlas": atlas["uv_atlas"],
+        "planar_prior": True,
         "trained": False,
         "splatfacto": False,
         "n_kept": int(filtered["n_kept"]),
@@ -684,8 +761,9 @@ def publish_can(root: Path | None = None) -> dict[str, Any]:
 
 def refresh_block_e(obj: str = "can", root: Path | None = None) -> dict[str, Any]:
     """Rewrite ingest/block_e.json from files. A missing artifact stays unachieved."""
-    if obj != "can":
-        raise GateError("block E score refresh is can only")
+    name = str(obj).strip()
+    if not name or name in {".", ".."} or "/" in name or "\\" in name:
+        raise GateError("object name must be a single folder name")
     folder = object_dir(obj, root)
     from tools.sceneagent_blocks import _block_e
 
@@ -1138,7 +1216,7 @@ def _e2_status(folder: Path) -> dict[str, Any]:
     elif one_body:
         state = "partial"
         reason = (
-            "No part masks, so the can stays one body. parts/*.ply was not written. "
+            "No part masks, so the object stays one body. parts/*.ply was not written. "
             f"convex_hull {hull_state}; coacd {str(coacd_flag).lower()}."
         )
     else:

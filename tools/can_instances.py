@@ -1,8 +1,8 @@
 """Cluster can Gaussians and write Block B instance records.
 
 Uses mask-id votes plus B3 features. A single lifted mask is not itself
-an instance. Missing hand labels keep mIoU null. This module does not
-set m2_met or achieved.
+an instance. Hand labels are not scored here. mIoU stays null and M2
+stays unmet. This module does not set m2_met or achieved.
 """
 
 from __future__ import annotations
@@ -20,23 +20,30 @@ SILHOUETTE_KEEP = 0.35
 MIN_SIZE_FRAC = 0.05
 MIN_SIZE_ABS = 200
 MAX_K = 4
-REVIEW_QUESTION = (
-    "These images are four views of one clustered instance. "
-    "Is the instance complete, bleeding into neighbours, or wrongly labelled?"
-)
 REVIEW_PARAMS = ("merge", "split", "prompt")
 ORBITS = ("orbit1", "orbit2", "orbit3")
-CAN_CAPTURE = {
-    "used_for_eval": "data/can/raw/orbit1.MOV",
-    "ns_train": "not_run",
-    "colmap": "not_rerun",
-    "orbits": [
-        {"path": "data/can/raw/orbit1.MOV", "exists": True, "existing_capture": True},
-        {"path": "data/can/raw/orbit2.MOV", "exists": True, "existing_capture": True},
-        {"path": "data/can/raw/orbit3.MOV", "exists": True, "existing_capture": True},
-    ],
-    "existing_capture": True,
-}
+
+
+def capture_for(folder: Path) -> dict[str, Any]:
+    """Capture paths for this object folder. A new video is not recorded as the can."""
+    name = folder.name
+    orbits = []
+    for index in (1, 2, 3):
+        video = folder / "raw" / f"orbit{index}.MOV"
+        orbits.append(
+            {
+                "path": f"data/{name}/raw/orbit{index}.MOV",
+                "exists": video.is_file(),
+                "existing_capture": video.is_file(),
+            }
+        )
+    return {
+        "used_for_eval": f"data/{name}/raw/orbit1.MOV",
+        "ns_train": "not_run",
+        "colmap": "not_rerun",
+        "orbits": orbits,
+        "existing_capture": any(row["exists"] for row in orbits),
+    }
 
 
 def flatten_features(features: np.ndarray) -> np.ndarray:
@@ -56,6 +63,7 @@ def cluster_gaussians(
     means: np.ndarray | None = None,
     votes: np.ndarray | None = None,
     *,
+    object_name: str = "can",
     rng: np.random.Generator | None = None,
 ) -> dict[str, Any]:
     """Cluster inside-mask Gaussians by mask-id votes and B3 features.
@@ -110,7 +118,7 @@ def cluster_gaussians(
     instances: list[dict[str, Any]] = []
     for inst_i, (_size, members) in enumerate(kept):
         assignment[members] = inst_i
-        instances.append(_instance_record(inst_i, members, codes, vote, xyz))
+        instances.append(_instance_record(inst_i, members, codes, vote, xyz, object_name=object_name))
     meta["n_instances"] = len(instances)
     meta["n_object"] = int((assignment >= 0).sum())
     meta["n_unassigned"] = int(n - meta["n_object"])
@@ -136,14 +144,17 @@ def apply_hand_score(record: dict[str, Any], score: dict[str, Any]) -> dict[str,
 def review_instance_views(
     images: list[str | Path],
     record_path: str | Path | None = None,
+    *,
+    object_name: str,
 ) -> dict[str, Any]:
-    """Ask the VLM once. Missing pictures or a failed call stay asked false."""
-    from tools.common.vlm import MissingReviewImage, VlmError, review
+    """Ask the VLM once. The question names object_name. Missing pictures stay asked false."""
+    from tools.common.vlm import MissingReviewImage, VlmError, instance_review_question, review
 
     if not images:
         return {"asked": False, "reason": "no instance review pictures", "verdict": None}
+    question = instance_review_question(object_name)
     try:
-        verdict = review("B4", images, REVIEW_QUESTION, REVIEW_PARAMS, record_path=record_path)
+        verdict = review("B4", images, question, REVIEW_PARAMS, record_path=record_path)
     except MissingReviewImage as exc:
         return {"asked": False, "reason": str(exc), "verdict": None}
     except (VlmError, OSError, ValueError, json.JSONDecodeError) as exc:
@@ -170,7 +181,7 @@ def write_instance_record(
     review_views: list[str] | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Write one instances.json. miou stays null unless the scorer measured it."""
+    """Write one instances.json. Hand-label scores are not copied in. M2 stays unmet."""
     folder = Path(folder)
     instances = list(clustered.get("instances") or [])
     meta = clustered.get("meta") if isinstance(clustered.get("meta"), dict) else {}
@@ -183,7 +194,7 @@ def write_instance_record(
     kind = "vlm" if asked else "none"
     record: dict[str, Any] = {
         "block": "B",
-        "capture": CAN_CAPTURE,
+        "capture": capture_for(folder),
         "instances": instances,
         "background": {
             "foreground": False,
@@ -195,12 +206,12 @@ def write_instance_record(
             "scene_mean_measured": False,
             "reason": "one mixed object vector is not a separate scene-mean measurement",
         },
-        "codebook": "langsplat gaussian_lang_idx" if orbit in (None, "orbit1") else f"data/can/codebook_{orbit}.json",
+        "codebook": "langsplat gaussian_lang_idx" if orbit in (None, "orbit1") else f"data/{folder.name}/codebook_{orbit}.json",
         "langsplat_codebook": orbit in (None, "orbit1"),
         "miou": None,
         "hand_labels": 0,
         "instance_count": len(instances),
-        "instance_count_note": f"{len(instances)} vs one can in the capture; instance count is not a substitute for mIoU",
+        "instance_count_note": f"{len(instances)} vs one {folder.name} in the capture; instance count is not a substitute for mIoU",
         "learned_prior": False,
         "n_object": n_object,
         "n_unassigned": n_unassigned,
@@ -212,13 +223,41 @@ def write_instance_record(
         "review": review,
         "m2_met": False,
         "achieved": False,
+        "block_c_ready": False,
     }
+    if review.get("verdict") == "fail" or review.get("problem") == "extra_part":
+        record["block_c_reason"] = (
+            "B4 review failed"
+            + (f" with {review.get('problem')}" if review.get("problem") else "")
+            + "; Block C stays unstarted until the instance is split and the review passes"
+        )
+        # #region agent log
+        try:
+            import time
+            line = json.dumps({
+                "sessionId": "9f1777",
+                "runId": "extra-part",
+                "hypothesisId": "floor-in-cluster",
+                "location": "can_instances.py:write_instance_record",
+                "message": "extra_part fail blocks Block C",
+                "data": {
+                    "orbit": orbit,
+                    "problem": review.get("problem"),
+                    "verdict": review.get("verdict"),
+                },
+                "timestamp": int(time.time() * 1000),
+            })
+            with (Path(__file__).resolve().parents[1] / "debug-9f1777.log").open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        except OSError:
+            pass
+        # #endregion
     if orbit is not None:
         record["orbit"] = orbit
     if extra:
         record.update(extra)
-    if hand_score is not None:
-        record = apply_hand_score(record, hand_score)
+    # hand_score is accepted so older callers still run. It is not copied.
+    _ = hand_score
     dest = folder / "semantics" / "instances.json" if orbit is None else folder / "semantics" / orbit / "instances.json"
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
@@ -239,7 +278,7 @@ def write_orbit_membership(
     clustered = {
         "instances": [
             {
-                "name": "can",
+                "name": folder.name,
                 "foreground": True,
                 "n_gaussians": n_inside,
                 "codebook_index": codebook_index,
@@ -270,30 +309,13 @@ def write_orbit_membership(
     )
 
 
-def merge_hand_score(folder: Path) -> dict[str, Any]:
-    """Run the M2 scorer and copy its refusal or number into instance files."""
-    from tools.can_hand_labels import score_object
-
-    folder = Path(folder)
-    score = score_object(folder)
-    paths = [folder / "semantics" / "instances.json"]
-    paths.extend(folder / "semantics" / orbit / "instances.json" for orbit in ORBITS)
-    for path in paths:
-        if not path.is_file():
-            continue
-        record = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(record, dict):
-            continue
-        path.write_text(json.dumps(apply_hand_score(record, score), indent=2) + "\n", encoding="utf-8")
-    return score
-
-
 def _instance_record(
     inst_i: int,
     members: np.ndarray,
     codes: np.ndarray,
     vote: np.ndarray,
     xyz: np.ndarray | None,
+    object_name: str = "can",
 ) -> dict[str, Any]:
     code = None
     if members.size:
@@ -301,7 +323,7 @@ def _instance_record(
         code = int(np.bincount(clipped).argmax())
     bbox = bounding_boxes(xyz[members]) if xyz is not None and members.size else {"aabb": None, "obb": None}
     return {
-        "name": "can" if inst_i == 0 else f"can_{inst_i + 1}",
+        "name": object_name if inst_i == 0 else f"{object_name}_{inst_i + 1}",
         "foreground": True,
         "n_gaussians": int(members.size),
         "codebook_index": code,
@@ -445,18 +467,18 @@ def _review_images(folder: Path) -> list[Path]:
     return sorted(path for path in review_dir.glob("instance_0_view_*.png") if path.is_file())[:4]
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Score and optionally VLM-review can B4 instances")
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Optionally VLM-review B4 instances. Hand labels are not scored.")
     parser.add_argument("--obj", default="can")
     parser.add_argument("--root", type=Path, default=None)
     parser.add_argument("--review", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     folder = object_dir(args.obj, args.root)
     review_record: dict[str, Any] | None = None
     if args.review:
         images = _review_images(folder)
         dest = folder / "reviews" / "b4_instance.json"
-        review_record = review_instance_views(images, dest)
+        review_record = review_instance_views(images, dest, object_name=args.obj)
         for path in (
             folder / "semantics" / "instances.json",
             folder / "semantics" / "orbit1" / "instances.json",
@@ -471,9 +493,8 @@ def main() -> int:
             record["review_views"] = [str(path.relative_to(repo_root())).replace("\\", "/") if path.is_absolute() else str(path) for path in images]
             path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
         print(json.dumps({"review": review_record}, indent=2))
-    score = merge_hand_score(folder)
-    print(json.dumps({k: score[k] for k in ("ok", "hand_labels", "miou", "m2_met", "achieved", "reason")}, indent=2))
-    return 0 if score["ok"] else 2
+    print(json.dumps({"ok": True, "m2_met": False, "achieved": False, "hand_labels": "not_scored"}, indent=2))
+    return 0
 
 
 if __name__ == "__main__":

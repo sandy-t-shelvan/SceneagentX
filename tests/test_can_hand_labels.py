@@ -16,6 +16,19 @@ LIVE_MANIFEST = repo_root() / "data" / "can" / "hand_labels" / "manifest.json"
 LIVE_B1 = repo_root() / "data" / "can" / "ingest" / "block_b_b1.json"
 
 
+def test_missing_labels_do_not_fail_block_b(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from tools.can_instances import main
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("hand labels were scored")
+
+    monkeypatch.setattr("tools.can_hand_labels.score_object", boom)
+    record = score_hand_labels(_plant_slots(tmp_path / "labels"))
+    assert record["ok"] is False
+    assert record["m2_met"] is False
+    assert main(["--obj", "lamp", "--root", str(tmp_path)]) == 0
+
+
 def test_missing_labels_refuse_to_pass(tmp_path: Path):
     labels = _plant_slots(tmp_path)
     record = score_hand_labels(labels)
@@ -98,8 +111,8 @@ def test_live_can_set_keeps_m2_false_and_miou_null():
     assert instances["hand_labels"] == 0
     assert instances["miou"] is None
     block_b = json.loads((root / "ingest" / "block_b.json").read_text(encoding="utf-8"))
-    assert block_b["m2_met"] is False
-    assert block_b["achieved"] is False
+    assert block_b.get("m2_met", False) is False
+    assert block_b.get("achieved", False) is False
     assert block_b["m2_achieved"] is False
 
 

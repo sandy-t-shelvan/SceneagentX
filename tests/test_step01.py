@@ -83,3 +83,18 @@ def test_far_camera_is_flagged(tmp_path: Path):
     centers = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [50.0, 0.0, 0.0]])
     assert far_camera_count(centers) == 1
     assert plot_cameras(centers, tmp_path / "cameras.png") == 1
+
+
+def test_nonphysical_reproj_is_excluded():
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[1] / "vast-cluster" / "scripts" / "object_colmap_gate.py"
+    spec = importlib.util.spec_from_file_location("object_colmap_gate", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    mean, excluded = module.mean_reproj_from_errors([0.4, 0.6, 1e154])
+    assert excluded == 1
+    assert abs(mean - 0.5) < 1e-9
+    clean, none_excluded = module.mean_reproj_from_errors([0.5, 0.7])
+    assert none_excluded == 0
+    assert abs(clean - 0.6) < 1e-9

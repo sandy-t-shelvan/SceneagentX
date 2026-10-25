@@ -2,7 +2,63 @@
 
 ## [Unreleased]
 
+### Added
+- tests/test_orbit_chain.py: a Block C object ply whose rows match the physics bake passes Block D, and M4 stays unmet
+- tests/test_block_c.py: every eligible room-covering crop returns no crop and does not save the mask
+- tests/test_block_c.py: a room-covering anchor loses to the compact high-recall crop from the orbit 2 measurement
+- tests/test_task_spec.py: a room-sized lift records one box_threshold retry, a second room-sized lift stays refused, and an orbit job skips the half-scene test
+- tests/test_block_c.py: an orbit job skips the half-scene crop refusal, and a smaller lift after the retry uses the room crop
+- tests/test_block_c.py: a room-covering mask writes no ply, and an object-only orbit keeps infill skipped
+- tests/test_orbit_chain.py: a refused crop stays measured with achieved false
+- tools/task_spec.py: store the user's pipeline prompt and check the target mask once, with one text_prompt or box_threshold retry
+- tests/test_task_spec.py: the stored prompt matches the user, the spec precedes segmentation, and a second mask miss stops
+- vast-cluster/scripts/object_block_b_report.py: Block B scores from artifacts, with LangSplat measured only from the codebook arrays and M1 and M2 left unmet
+- tests/test_object_block_b_report.py: a physics-vector npz is not a LangSplat codebook, and the written score keeps miou null
+
 ### Changed
+- tools/orbit_chain.py: Block D passes when the Block C object ply and the physics bake match, and M4 stays unmet
+- tools/orbit_chain.py: the chain Block D record stores each sub-step result, and a missing checkpoint or an unrun settle stays unachieved
+- tools/orbit_chain.py: gaussian physics rows follow prior_input.npy when that file exists, not the full-splat mask
+- tools/block_c.py: every eligible room-covering crop returns no crop, so a room job does not replace gaussian_in_mask.npy
+- tools/block_c.py: the lift keeps a high-recall crop that does not cover the room when the widest set does
+- tools/task_spec.py: a room job records one box_threshold retry when the lift on disk already covers the room
+- tools/pipeline.py: mask_retry.json reruns detection and lift once for the failing orbits and does not retrain the splat
+- tools/block_c.py: the first room-sized mask is not cropped or infilled, and an orbit job skips the half-scene test
+- tools/block_c.py: a room-covering mask is not written as a crop, and an object-only orbit keeps infill skipped
+- tools/orbit_chain.py: a refused crop stays measured and unachieved, and skipped object-only infill is not a pass
+- tools/pipeline.py: --prompt stores the user's text and writes the task spec before segmentation
+- tools/common/vlm.py: one laptop parse of the pipeline prompt; a missing key does not invent names
+- tools/block_b_job.py: the detector caption is the spec target, including bottle, and a frame-covering mask is dropped
+- tools/can_block_b_check.py: Block B no longer requires hand labels or mIoU, and M2 stays unmet
+- tools/can_instances.py: Block B does not score hand labels into instances.json
+- tests/test_can_block_b_orbits.py: a missing hand-label set does not fail Block B, and an orbit job skips the room-span refusal
+- tests/test_can_hand_labels.py: the hand-label scorer is not called by Block B
+- tests/test_block_b_job.py: bottle is an allowed target and a room spec does not caption the other names
+- tools/orbit_chain.py: D1.4 records that prior_input.npy exists when the learned-prior checkpoint is the thing that is missing
+- tests/test_orbit_chain.py: a missing prior file is named in D1.4, and a present file is not called missing
+- tools/block_d.py: D2 JPEG-shrinks each frame before the request so the JSON body stays under 50 MB
+- tests/test_block_d.py: an oversized frame is reduced before the D2 request, and a missing key or bad reply writes no physics.json
+- tools/block_b_job.py: Vaseline is an allowed Block B object name; bottle stays refused
+- tools/can_block_b_check.py: a mask lift refuses the feature field when covers_room is true or the span ratio is at least 0.5
+- tools/can_instances.py: a clustered instance takes the object name, and one named instance is still not mIoU
+- vast-cluster/scripts/object_langsplat_b2.py: a missing physics vector is left absent and is not renamed
+- vast-cluster/scripts/object_langsplat_b3.py: feature-field paths use the object folder, and a span ratio of at least 0.5 refuses training
+- tests/test_block_b_job.py: vaseline is an allowed object name and still gets the single prompt
+- tests/test_can_block_b_orbits.py: a span ratio of 0.5 refuses the feature field when covers_room is false
+- tests/test_can_instances.py: an instance can be named vaseline without that name becoming mIoU
+- tools/block_b_job.py: Block B installs OpenCLIP in the sa env and stops before the feature field when the codebook fails
+- tests/test_block_b_job.py: a new object gets one prompt, an OpenCLIP install, and a stop before the field
+- tools/can_instances.py: instance capture paths use the object folder name
+- tools/block_e.py: contact-plane Poisson, planar UVs, V-HACD left false without the library, fTetWild runs only when it is already installed, and the Block E score accepts any object name
+- tests/test_block_e.py: contact plane, planar UVs, and a bottle Block E score stay unachieved
+- tools/common/vlm.py: instance review names the object and treats attached room fragments as extra_part
+- tools/can_instances.py: B4 instance review passes the object name into that question
+- tests/test_can_instances.py: the instance-review question is checked for the named object
+- tests/test_can_instances.py: an extra_part fail keeps Block C unstarted
+- tools/can_instances.py: an extra_part review fail keeps Block C unstarted
+- tools/can_block_b_check.py: a mask lift that covers the room refuses the B3 feature field
+- vast-cluster/scripts/object_langsplat_b3.py: do not train when that lift already covers the room
+- tests/test_can_block_b_orbits.py: orbit 2 span refuses the field and a tight span does not
 - tools/step01_colmap.py: registration passes at 80 percent of extracted frames
 - tools/can_block_b_check.py: the same 80 percent registration line as step01
 - tests/test_step01.py: 87.2 percent registers as a pass and 79.9 percent stays a fail
@@ -12,6 +68,15 @@
 - tests/test_block_d.py: refresh_block_d stays not_started until physics.json has material and mass_kg
 
 ### Fixed
+- tools/block_d.py: a rejected D2 reply is saved as d2_response.json and still writes no mass or physics.json
+- tests/test_block_d.py: a missing mass saves that raw reply and still writes no physics.json
+- tools/block_d.py: D2 asks for an unchecked visual material and mass_kg, and alias keys count only when the values are real
+- tests/test_block_d.py: a real alias mass is kept, and a missing or non-numeric mass still writes no physics.json
+- tools/orbit_chain.py: D1.3 names a missing scene-mean or assigned vectors instead of No splat, and copy_c1_pose lets Block F read the C1 pose
+- tests/test_orbit_chain.py: a missing prior names the writer reason, and F1 copies the C1 pose without inventing IoU
+- vast-cluster/scripts/object_colmap_gate.py: a non-physical model_analyzer mean is replaced by the mean of finite point errors
+- tests/test_step01.py: a million-pixel outlier is excluded from that mean
+- tools/can_block_b_check.py: B2 step label follows the LangSplat codebook on disk, and the debug-00b29d log helper is removed
 - tools/orbit_chain.py: start_d2 reads OPENAI_API_KEY instead of an empty api_key override
 - tools/block_d.py: a blank api_key does not discard OPENAI_API_KEY or invent a mass
 - tests/test_orbit_chain.py: a missing key still skips D2, and a present key is not discarded by an empty api_key string
@@ -27,6 +92,9 @@
 - tests/test_orbit_chain.py: hulls and a recorded deformable_type are required before E2 or E4 are partial
 
 ### Added
+- tools/block_c.py: write a hole mask where background alpha is below the full splat, and leave LaMa infill not_run when LaMa cannot be imported
+- tests/test_block_c.py: a hole follows the alpha drop, and C3 without LaMa stays not_run and is not a pass
+- tests/test_can_block_b_orbits.py: B2 label is LangSplat measured only when features.codebook.npz is a LangSplat codebook
 - tools/orbit_chain.py: run can orbits 1–3 from Block B files through D, E, and F; skip C; log orbit_chain.md
 - tests/test_orbit_chain.py: tmp_path chain; C skipped, no key, no splat, and no world_T stay unachieved
 - tools/block_f.py: 7-DoF alignment, background orientation, scene USDZ, and Isaac inspect; a skip is not achieved

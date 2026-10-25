@@ -1,8 +1,9 @@
 """Compare a can orbit Block B score file to the artifacts it claims to copy.
 
 A skipped or missing check is a fail. It is never a pass and never flips
-achieved. This module does not train, does not call SAM or DINOv2, and
-does not invent mIoU from silhouette IoU.
+achieved. Hand labels, Label Studio, and mIoU are not gates. M2 is not
+marked achieved. This module does not train, does not call SAM or DINOv2,
+and does not invent mIoU from silhouette IoU.
 """
 
 from __future__ import annotations
@@ -21,12 +22,78 @@ M1_PSNR = 27.0
 M1_LPIPS = 0.20
 REGISTERED_MIN = 80.0
 REPROJ_MAX_PX = 1.0
+
+
+def feature_field_refusal(lift: dict[str, Any] | None, job: str | None = None) -> str | None:
+    """A room job must not train the B3 field on a room-sized lift.
+
+    An orbit job skips this half-scene test. A missing job keeps the
+    refusal, so an older can orbit is not trained to fill the gap.
+    """
+    if job == "orbit":
+        return None
+    if not isinstance(lift, dict):
+        return None
+    span_in = lift.get("span_inside")
+    span_sc = lift.get("span_scene")
+    ratio = None
+    if _number(span_in) is not None and _number(span_sc) not in (None, 0):
+        ratio = float(span_in) / float(span_sc)
+    covers = lift.get("covers_room") is True or (ratio is not None and ratio >= 0.5)
+    if not covers:
+        return None
+    reason = (
+        "mask lift covers the room "
+        f"(span_inside {lift.get('span_inside')} span_scene {lift.get('span_scene')}); "
+        "feature field was not trained"
+    )
+    # #region agent log
+    try:
+        import json
+        import time
+        from pathlib import Path
+
+        line = json.dumps({
+            "sessionId": "9f1777",
+            "runId": "b3-room-guard",
+            "hypothesisId": "covers-room",
+            "location": "can_block_b_check.py:feature_field_refusal",
+            "message": "feature field refused because the lift covers the room",
+            "data": {
+                "span_inside": lift.get("span_inside"),
+                "span_scene": lift.get("span_scene"),
+                "n_inside": lift.get("n_inside"),
+            },
+            "timestamp": int(time.time() * 1000),
+        })
+        with (Path(__file__).resolve().parents[1] / "debug-9f1777.log").open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except OSError:
+        pass
+    # #endregion
+    return reason
+
+
+def find_lift_span(record: Any) -> dict[str, Any] | None:
+    """Return the nested mask-lift object that carries covers_room and span_inside."""
+    if isinstance(record, dict):
+        if "covers_room" in record and "span_inside" in record:
+            return record
+        for value in record.values():
+            found = find_lift_span(value)
+            if found is not None:
+                return found
+    elif isinstance(record, list):
+        for value in record:
+            found = find_lift_span(value)
+            if found is not None:
+                return found
+    return None
 STEP_LABELS = {
     "A": "measured",
     "B1": "measured",
-    "B2": "LangSplat unstarted",
     "B3": "mask lift measured",
-    "B4": "mIoU unmeasured",
+    "B4": "instances measured",
 }
 
 
@@ -58,15 +125,10 @@ def check_orbit(folder: Path, orbit: str) -> dict[str, Any]:
     }
     score = loaded["score"]
     m1_met = False
+    # Hand labels are not a Block B gate. M2 stays unmet.
     m2_met = False
     if steps["A"].get("metres_per_unit") is not None and score.get("m1_met") is True:
         m1_met = True
-    if (
-        steps["B4"]["numbers"].get("miou") is not None
-        and int(steps["B4"]["numbers"].get("hand_labels") or 0) >= 20
-        and score.get("m2_met") is True
-    ):
-        m2_met = True
     record = {
         "object": "can",
         "orbit": orbit,
@@ -290,6 +352,7 @@ def _check_b2(folder: Path, orbit: str, loaded: dict[str, Any], present: dict[st
         mismatch,
         achieved_claimed,
         skipped,
+        label="LangSplat measured" if has_book else "LangSplat unstarted",
     )
 
 
@@ -409,13 +472,19 @@ def _step(
     mismatch: list[str],
     achieved_claimed: bool,
     skipped: list[str],
+    label: str | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
     if skipped:
         ok = False
+        shown = "skipped"
+    elif label is not None:
+        shown = label
+    else:
+        shown = STEP_LABELS[name]
     record = {
         "ok": ok,
-        "label": "skipped" if skipped else STEP_LABELS[name],
+        "label": shown,
         "numbers": numbers,
         "mismatch": mismatch,
         "achieved_claimed": achieved_claimed,

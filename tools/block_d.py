@@ -258,6 +258,8 @@ def start_d2(
     """Create physics.json from four renders, a name, and a COLMAP bbox.
 
     No key or an unusable response does not write a class-default mass.
+    A rejected reply is saved as d2_response.json. metres_per_unit stays null.
+    The request JPEG-shrinks each frame so the JSON body stays under 50 MB.
     """
     if obj == "bottle":
         raise GateError("start_d2 refuses bottle; bottle physics.json stays untouched")
@@ -271,13 +273,18 @@ def start_d2(
         return "model not asked"
     if ask is None and not key:
         return "model not asked"
+    parsed: Any = None
     try:
         parsed = ask(existing, name, bbox, key) if ask is not None else _ask_start_d2(existing, name, bbox, key)
         record = write_d2_record(parsed, name, bbox, existing)
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError, GateError):
+        _save_rejected_d2_reply(path.parent, parsed)
         return "response not usable"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    stale_reply = path.parent / "d2_response.json"
+    if stale_reply.is_file():
+        stale_reply.unlink()
     return "filled"
 
 
@@ -307,19 +314,28 @@ def write_d2_record(
     return lock_learned_prior(record)
 
 
+_MATERIAL_KEYS = ("material", "material_name", "material_type")
+_MASS_KEYS = ("mass_kg", "estimated_mass_kg", "visual_mass_kg", "mass")
+_D2_NESTED = ("physics", "estimate", "visual_estimate")
+
+
 def parse_d2_response(parsed: dict[str, Any]) -> dict[str, Any]:
-    """Keep the D2 schema. Missing mass stays missing; nothing is invented."""
+    """Keep the D2 schema. Alias keys count only when the value is real."""
     if not isinstance(parsed, dict):
         raise TypeError("d2 response must be an object")
     record: dict[str, Any] = {}
-    material = parsed.get("material")
-    if isinstance(material, str) and material.strip():
-        record["material"] = material.strip()
+    material = _d2_text(parsed, _MATERIAL_KEYS)
+    if material:
+        record["material"] = material
     for name in ("mass_kg", "density", "static_friction", "dynamic_friction", "restitution", "rigidity"):
         value = _finite(parsed.get(name))
         if value is not None:
             record[name] = value
-    kind = parsed.get("deformable_type")
+    if record.get("mass_kg") is None:
+        mass = _d2_number(parsed, _MASS_KEYS[1:])
+        if mass is not None:
+            record["mass_kg"] = mass
+    kind = _d2_exact(parsed, "deformable_type")
     if kind in _DEFORMABLE:
         record["deformable_type"] = kind
     ranges = parsed.get("ranges")
@@ -332,6 +348,22 @@ def parse_d2_response(parsed: dict[str, Any]) -> dict[str, Any]:
     if not record.get("material") or record.get("mass_kg") is None:
         raise GateError("d2 response is missing material or mass_kg")
     return record
+
+
+def _save_rejected_d2_reply(folder: Path, parsed: Any) -> None:
+    """Keep the model object that parse_d2_response refused. Do not add a mass."""
+    if parsed is None:
+        return
+    try:
+        text = json.dumps(parsed, indent=2) + "\n"
+    except (TypeError, ValueError):
+        return
+    dest = Path(folder) / "d2_response.json"
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text, encoding="utf-8")
+    except OSError:
+        return
 
 
 def fuse_physics(
@@ -764,37 +796,96 @@ def _d3_artifact(usda: bool, npy: bool) -> str:
     return ", ".join(names)
 
 
-def _ask_start_d2(frames: list[Path], name: str, bbox: dict[str, Any], api_key: str) -> dict[str, Any]:
-    import base64
-    import urllib.request
+# OpenAI rejects the JSON body at 50 MB (HTTP 400). Stay strictly under.
+_D2_BODY_LIMIT = 50_000_000
+_D2_JPEG_STEPS = tuple(
+    (scale, quality)
+    for scale in (1.0, 0.75, 0.5, 0.35, 0.25, 0.125)
+    for quality in (85, 70, 55, 40)
+)
 
-    content: list[dict[str, Any]] = [
-        {
-            "type": "text",
-            "text": (
-                "Reply with JSON only for this object. Name: "
-                + name
-                + ". COLMAP bbox: "
-                + json.dumps(bbox)
-                + ". metres_per_unit is null; do not invent metres or a class-default mass. "
-                "Schema keys: material, mass_kg, density, static_friction, dynamic_friction, "
-                "restitution, rigidity (0 to 1), deformable_type (rigid|cloth|rope|soft), "
-                "ranges (object of [low, high] per numeric field), provenance."
-            ),
-        }
-    ]
-    for frame in frames:
-        encoded = base64.b64encode(frame.read_bytes()).decode("ascii")
-        mime = "image/jpeg" if frame.suffix.lower() in {".jpg", ".jpeg"} else "image/png"
-        content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}})
-    payload = {
+
+def _d2_prompt_text(name: str, bbox: dict[str, Any]) -> str:
+    return (
+        "Reply with JSON only for this object. Name: "
+        + name
+        + ". COLMAP bbox: "
+        + json.dumps(bbox)
+        + ". metres_per_unit is null; do not invent metres_per_unit. "
+        "Do not use a class-default table and do not fill mass_kg from a class default. "
+        "Give a visual estimate of material as a non-empty string and mass_kg as a finite number of kilograms. "
+        "Label that mass unchecked. "
+        "Schema keys: material, mass_kg, density, static_friction, dynamic_friction, "
+        "restitution, rigidity (0 to 1), deformable_type (rigid|cloth|rope|soft), "
+        "ranges (object of [low, high] per numeric field), provenance."
+    )
+
+
+def _d2_payload(name: str, bbox: dict[str, Any], jpegs: list[bytes]) -> dict[str, Any]:
+    import base64
+
+    content: list[dict[str, Any]] = [{"type": "text", "text": _d2_prompt_text(name, bbox)}]
+    for blob in jpegs:
+        encoded = base64.b64encode(blob).decode("ascii")
+        content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}})
+    return {
         "model": "gpt-6-astra",
         "response_format": {"type": "json_object"},
         "messages": [{"role": "user", "content": content}],
     }
+
+
+def _d2_body(name: str, bbox: dict[str, Any], jpegs: list[bytes]) -> bytes:
+    return json.dumps(_d2_payload(name, bbox, jpegs)).encode("utf-8")
+
+
+def shrink_d2_frames(frames: list[Path], name: str, bbox: dict[str, Any]) -> list[bytes]:
+    """JPEG bytes for one D2 request. The JSON body that carries them stays under 50 MB."""
+    import cv2
+
+    images = []
+    for frame in frames:
+        image = cv2.imread(str(frame), cv2.IMREAD_COLOR)
+        if image is None or image.size == 0:
+            raise OSError(f"unreadable D2 frame {frame.name}")
+        images.append(image)
+    for scale, quality in _D2_JPEG_STEPS:
+        blobs = [
+            _encode_d2_jpeg(cv2, _scale_d2_image(cv2, image, scale), quality) for image in images
+        ]
+        if len(_d2_body(name, bbox, blobs)) < _D2_BODY_LIMIT:
+            return blobs
+    raise OSError("D2 frames do not fit under 50 MB")
+
+
+def _scale_d2_image(cv2: Any, image: np.ndarray, scale: float) -> np.ndarray:
+    if scale >= 1.0:
+        return image
+    height, width = image.shape[:2]
+    width_px = max(1, int(round(width * scale)))
+    height_px = max(1, int(round(height * scale)))
+    if width_px == width and height_px == height:
+        return image
+    return cv2.resize(image, (width_px, height_px), interpolation=cv2.INTER_AREA)
+
+
+def _encode_d2_jpeg(cv2: Any, image: np.ndarray, quality: int) -> bytes:
+    ok, encoded = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)])
+    if not ok:
+        raise OSError("could not encode a D2 frame as JPEG")
+    return encoded.tobytes()
+
+
+def _ask_start_d2(frames: list[Path], name: str, bbox: dict[str, Any], api_key: str) -> dict[str, Any]:
+    """POST one D2 request. Each frame is JPEG and the JSON body stays under 50 MB."""
+    import urllib.request
+
+    data = _d2_body(name, bbox, shrink_d2_frames(frames, name, bbox))
+    if len(data) >= _D2_BODY_LIMIT:
+        raise OSError("D2 request body is over 50 MB")
     request = urllib.request.Request(
         "https://api.openai.com/v1/chat/completions",
-        data=json.dumps(payload).encode("utf-8"),
+        data=data,
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         method="POST",
     )
@@ -813,6 +904,40 @@ def _mean_record(field: dict[str, np.ndarray], mask: np.ndarray) -> dict[str, An
         rows = arr[mask] if arr.shape[0] == mask.size else arr
         out[name] = np.mean(rows, axis=0).tolist() if rows.size else None
     return out
+
+
+def _d2_sources(parsed: dict[str, Any]) -> list[dict[str, Any]]:
+    sources = [parsed]
+    for name in _D2_NESTED:
+        nested = parsed.get(name)
+        if isinstance(nested, dict):
+            sources.append(nested)
+    return sources
+
+
+def _d2_text(parsed: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for source in _d2_sources(parsed):
+        for name in keys:
+            value = source.get(name)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _d2_number(parsed: dict[str, Any], keys: tuple[str, ...]) -> float | None:
+    for source in _d2_sources(parsed):
+        for name in keys:
+            value = _finite(source.get(name))
+            if value is not None:
+                return value
+    return None
+
+
+def _d2_exact(parsed: dict[str, Any], name: str) -> Any:
+    for source in _d2_sources(parsed):
+        if name in source and source.get(name) not in (None, ""):
+            return source.get(name)
+    return None
 
 
 def _has_value(record: dict[str, Any], name: str) -> bool:

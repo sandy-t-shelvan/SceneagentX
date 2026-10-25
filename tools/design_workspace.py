@@ -122,28 +122,66 @@ def _write_feature_field(folder: Path) -> Path | None:
     return index_path
 
 
-def crop_splat(splat: Path, mask: np.ndarray, destination: Path) -> dict[str, Any]:
-    """Write the masked Gaussians, recentered, and drop opacity below 0.05.
+def _outside_box(xyz: np.ndarray, sigma: float = 2.0) -> np.ndarray:
+    """True where a point is outside the mean ± sigma box. Same rule as count_floaters."""
+    cloud = np.asarray(xyz, dtype=np.float64)
+    if cloud.ndim != 2 or cloud.shape[0] == 0 or cloud.shape[1] < 3:
+        return np.zeros((0 if cloud.ndim != 2 else cloud.shape[0],), dtype=bool)
+    points = cloud[:, 0:3]
+    center = points.mean(axis=0)
+    spread = points.std(axis=0)
+    return np.any(np.abs(points - center) > (sigma * spread), axis=1)
 
-    The translation that was removed is the bbox center. Infill is not run.
+
+def crop_splat(
+    splat: Path,
+    mask: np.ndarray,
+    destination: Path,
+    background: Path | None = None,
+) -> dict[str, Any]:
+    """Write masked Gaussians, recentered, and the scene Gaussians that remain.
+
+    Opacity below 0.05 is dropped. Object Gaussians outside the 2-sigma box are
+    dropped and counted. The translation removed from the object ply is the bbox
+    center of the Gaussians that were written. Infill is not run. background.ply
+    keeps the Gaussians outside the mask, in the original world frame.
     """
     header, table = _read_splat_table(splat)
-    if len(mask) != len(table):
-        raise ValueError(f"mask length {len(mask)} does not match {len(table)} gaussians")
+    flags = np.asarray(mask, dtype=bool).reshape(-1)
+    if len(flags) != len(table):
+        raise ValueError(f"mask length {len(flags)} does not match {len(table)} gaussians")
     names = _property_names(header)
     opacity = 1.0 / (1.0 + np.exp(-table[:, names.index("opacity")].astype(np.float64)))
-    keep = np.asarray(mask, dtype=bool) & (opacity >= 0.05)
+    keep = flags & (opacity >= 0.05)
     chosen = np.array(table[keep], copy=True)
-    xyz = chosen[:, 0:3]
-    low = xyz.min(axis=0)
-    high = xyz.max(axis=0)
-    center = (low + high) / 2.0
-    chosen[:, 0:3] = xyz - center.astype(np.float32)
-    _write_splat(destination, header, chosen)
+    n_removed = 0
+    if len(chosen):
+        outside = _outside_box(chosen[:, 0:3])
+        n_removed = int(outside.sum())
+        if n_removed:
+            chosen = np.array(chosen[~outside], copy=True)
+    if len(chosen) == 0:
+        center = None
+        floater_count = 0
+        _write_splat(destination, header, np.zeros((0, table.shape[1]), dtype=np.float32))
+    else:
+        chosen = np.array(chosen, copy=True)
+        floater_count = int(_outside_box(chosen[:, 0:3]).sum())
+        xyz = chosen[:, 0:3]
+        center_arr = (xyz.min(axis=0) + xyz.max(axis=0)) / 2.0
+        chosen[:, 0:3] = xyz - np.asarray(center_arr, dtype=np.float32)
+        _write_splat(destination, header, chosen)
+        center = [float(value) for value in center_arr]
+    background_rows = np.array(table[~flags], copy=True)
+    if background is not None:
+        _write_splat(background, header, background_rows)
     return {
-        "n_in": int(keep.sum()),
+        "n_in": int(len(chosen)),
+        "n_background": int(len(background_rows)),
         "n_source": int(len(table)),
-        "center": [float(value) for value in center],
+        "n_removed_floaters": n_removed,
+        "floater_count": floater_count,
+        "center": center,
         "infill": "not_run",
     }
 
@@ -193,15 +231,17 @@ def _crop_object(obj: str, folder: Path, root: Path | None) -> Path | None:
     error_note = destination.parent / "crop_error.json"
     if error_note.is_file():
         error_note.unlink()
-    _dump(
-        folder / "objects" / name / "world_T_object.json",
-        {
-            "translation": stats["center"],
-            "rotation_wxyz": [1.0, 0.0, 0.0, 0.0],
-            "scale": 1.0,
-            "infill": "not_run",
-        },
-    )
+    center = stats.get("center")
+    if isinstance(center, list) and len(center) == 3:
+        _dump(
+            folder / "objects" / name / "world_T_object.json",
+            {
+                "translation": center,
+                "rotation_wxyz": [1.0, 0.0, 0.0, 0.0],
+                "scale": 1.0,
+                "infill": "not_run",
+            },
+        )
     return destination
 
 

@@ -7,10 +7,22 @@ from pathlib import Path
 
 import pytest
 
-from tools.can_block_b_check import check_orbit
+from tools.can_block_b_check import check_orbit, feature_field_refusal, find_lift_span
 from tools.common.paths import repo_root
 
 LIVE_ORBIT2 = repo_root() / "data" / "can" / "ingest" / "block_b_orbit2.json"
+
+
+def test_room_sized_lift_refuses_the_feature_field():
+    lift = {"covers_room": True, "span_inside": 9.78, "span_scene": 20.44, "n_inside": 32366}
+    assert "covers the room" in feature_field_refusal(lift)
+    assert "covers the room" in feature_field_refusal(lift, job="room")
+    assert feature_field_refusal(lift, job="orbit") is None
+    assert feature_field_refusal({"covers_room": False, "span_inside": 0.67, "span_scene": 10.2}) is None
+    assert "covers the room" in feature_field_refusal({"covers_room": False, "span_inside": 5.0, "span_scene": 10.0})
+    assert feature_field_refusal({"covers_room": False, "span_inside": 5.0, "span_scene": 10.0}, job="orbit") is None
+    found = find_lift_span({"crop": lift})
+    assert found["n_inside"] == 32366
 
 
 def test_checker_records_each_sub_step(tmp_path: Path):
@@ -48,6 +60,40 @@ def test_null_miou_and_zero_hand_labels_leave_m2_false(tmp_path: Path):
     assert record["steps"]["B4"]["numbers"]["hand_labels"] == 0
     assert record["m2_met"] is False
     assert record["steps"]["B4"]["achieved_claimed"] is False
+
+
+def test_missing_hand_label_set_does_not_fail_block_b(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    folder = _plant(tmp_path, "orbit2")
+    assert not (folder / "hand_labels").exists()
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("hand labels were scored")
+
+    monkeypatch.setattr("tools.can_hand_labels.score_object", boom)
+    record = check_orbit(folder, "orbit2")
+    assert record["ok"] is True
+    assert record["m2_met"] is False
+    assert record["achieved"] is False
+    assert record["steps"]["B4"]["ok"] is True
+    assert record["steps"]["B4"]["skipped"] == []
+
+
+def test_measured_hand_labels_do_not_mark_m2_achieved(tmp_path: Path):
+    folder = _plant(tmp_path, "orbit3")
+    instances = json.loads((folder / "semantics" / "orbit3" / "instances.json").read_text(encoding="utf-8"))
+    instances["miou"] = 0.91
+    instances["hand_labels"] = 20
+    (folder / "semantics" / "orbit3" / "instances.json").write_text(json.dumps(instances), encoding="utf-8")
+    score = json.loads((folder / "ingest" / "block_b_orbit3.json").read_text(encoding="utf-8"))
+    score["m2_met"] = True
+    part = _part(score, "B4")
+    part["empirical"]["miou"] = 0.91
+    part["empirical"]["hand_labels"] = 20
+    (folder / "ingest" / "block_b_orbit3.json").write_text(json.dumps(score), encoding="utf-8")
+    record = check_orbit(folder, "orbit3")
+    assert record["m2_met"] is False
+    assert record["achieved"] is False
+    assert record["steps"]["B4"]["ok"] is True
 
 
 def test_claimed_m1_or_m2_without_gate_artifacts_is_mismatch(tmp_path: Path):
@@ -146,6 +192,25 @@ def test_feature_field_measured_without_npy_is_a_fail(tmp_path: Path):
     assert record["steps"]["B3"]["ok"] is False
     assert any("gaussian_features.npy" in item for item in record["steps"]["B3"]["mismatch"])
     assert record["steps"]["B3"]["achieved_claimed"] is False
+
+
+def test_b2_label_matches_langsplat_codebook(tmp_path: Path):
+    import numpy as np
+
+    folder = _plant(tmp_path, "orbit1")
+    bare = check_orbit(folder, "orbit1")
+    assert bare["steps"]["B2"]["numbers"]["langsplat"] is False
+    assert bare["steps"]["B2"]["label"] == "LangSplat unstarted"
+    np.savez(
+        folder / "semantics" / "features.codebook.npz",
+        codebook=np.zeros((2, 3), dtype=np.float32),
+        clip_features=np.zeros((2, 4), dtype=np.float32),
+        levels=np.zeros((2,), dtype=np.int16),
+    )
+    measured = check_orbit(folder, "orbit1")
+    assert measured["steps"]["B2"]["numbers"]["langsplat"] is True
+    assert measured["steps"]["B2"]["label"] == "LangSplat measured"
+    assert measured["achieved"] is False
 
 
 def test_missing_source_is_a_fail_not_a_pass(tmp_path: Path):

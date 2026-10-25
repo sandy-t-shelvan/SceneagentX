@@ -186,9 +186,136 @@ def test_d2_parsed_fixture_schema_mass_unchecked(tmp_path: Path):
 def test_d2_unusable_response_does_not_write(tmp_path: Path):
     frames = [_tiny_png(tmp_path / f"bad_{index}.png") for index in range(4)]
     bbox = {"metres_per_unit": None}
-    status = start_d2("can", frames, "can", bbox, root=tmp_path, ask=lambda *_args: {"material": "aluminum"})
+    reply = {"material": "aluminum"}
+    status = start_d2("can", frames, "can", bbox, root=tmp_path, ask=lambda *_args: reply)
     assert status == "response not usable"
     assert not (tmp_path / "data" / "can" / "physics.json").is_file()
+    saved = json.loads((tmp_path / "data" / "can" / "d2_response.json").read_text(encoding="utf-8"))
+    assert saved == reply
+    assert "mass_kg" not in saved
+    assert saved.get("metres_per_unit") is None
+    assert saved.get("learned_prior") is not True
+
+
+def test_d2_alias_keys_accept_only_real_values(tmp_path: Path):
+    parsed = parse_d2_response({"material_name": "aluminum", "estimated_mass_kg": 0.018, "mass_checked": True})
+    assert parsed["material"] == "aluminum"
+    assert parsed["mass_kg"] == 0.018
+    nested = parse_d2_response({"visual_estimate": {"material": "steel", "mass": 0.021}})
+    assert nested["material"] == "steel"
+    assert nested["mass_kg"] == 0.021
+    with pytest.raises(GateError):
+        parse_d2_response({"material_name": "  ", "mass": float("nan")})
+    with pytest.raises(GateError):
+        parse_d2_response({"material": "aluminum", "mass": "about 15 grams"})
+    frames = [_tiny_png(tmp_path / f"alias_{index}.png") for index in range(4)]
+    bbox = {"metres_per_unit": None}
+    status = start_d2(
+        "can",
+        frames,
+        "can",
+        bbox,
+        root=tmp_path,
+        ask=lambda *_args: {"material_name": "aluminum", "mass": 0.018, "mass_checked": True},
+    )
+    assert status == "filled"
+    saved = json.loads((tmp_path / "data" / "can" / "physics.json").read_text(encoding="utf-8"))
+    assert saved["material"] == "aluminum"
+    assert saved["mass_kg"] == 0.018
+    assert saved["mass_checked"] is False
+    assert saved["learned_prior"] is False
+    blank = tmp_path / "blank"
+    refused = start_d2(
+        "can",
+        frames,
+        "can",
+        bbox,
+        root=blank,
+        ask=lambda *_args: {"material_name": "aluminum"},
+    )
+    assert refused == "response not usable"
+    assert not (blank / "data" / "can" / "physics.json").is_file()
+
+
+def test_d2_oversized_frame_is_reduced_before_the_request(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import base64
+    import urllib.request
+
+    from tools.block_d import _D2_BODY_LIMIT
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    def blocked(*_args, **_kwargs):
+        raise RuntimeError("D2 test must not call the network")
+
+    monkeypatch.setattr(urllib.request, "urlopen", blocked)
+    frames = [
+        _solid_png(tmp_path / "oversized.png", 4200, 3200),
+        _solid_png(tmp_path / "small_1.png", 8, 8),
+        _solid_png(tmp_path / "small_2.png", 8, 8),
+        _solid_png(tmp_path / "small_3.png", 8, 8),
+    ]
+    bbox = {"span_inside": 0.55, "span_scene": 9.2, "metres_per_unit": None}
+    physics = tmp_path / "data" / "can" / "physics.json"
+    raw_b64 = len(base64.b64encode(frames[0].read_bytes()))
+    assert raw_b64 >= 50_000_000
+    assert _D2_BODY_LIMIT == 50_000_000
+    status = start_d2("can", frames, "can", bbox, root=tmp_path, api_key="")
+    assert status == "model not asked"
+    assert not physics.is_file()
+    assert list(tmp_path.rglob("physics.json")) == []
+
+    seen: dict = {}
+
+    class _Reply:
+        def read(self) -> bytes:
+            content = json.dumps({"material": "aluminum"})
+            return json.dumps({"choices": [{"message": {"content": content}}]}).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> bool:
+            return False
+
+    def capture(request, timeout=90):
+        seen["data"] = request.data
+        seen["timeout"] = timeout
+        seen["url"] = request.full_url
+        return _Reply()
+
+    monkeypatch.setattr(urllib.request, "urlopen", capture)
+    status = start_d2("can", frames, "can", bbox, root=tmp_path, api_key="present-test-key")
+    assert status == "response not usable"
+    assert not physics.is_file()
+    assert list(tmp_path.rglob("physics.json")) == []
+    body = seen["data"]
+    assert isinstance(body, bytes)
+    assert len(body) < 50_000_000
+    assert len(body) < raw_b64
+    from tools.block_d import _d2_prompt_text
+
+    payload = json.loads(body)
+    assert payload["model"] == "gpt-6-astra"
+    content = payload["messages"][0]["content"]
+    prompt = content[0]["text"]
+    assert prompt == _d2_prompt_text("can", bbox)
+    assert "do not invent metres_per_unit" in prompt
+    assert "class-default" in prompt
+    assert "visual estimate" in prompt
+    assert "unchecked" in prompt
+    assert "mass_kg" in prompt
+    assert seen["url"] == "https://api.openai.com/v1/chat/completions"
+    assert seen["timeout"] == 90
+    blobs = []
+    for part in content[1:]:
+        url = part["image_url"]["url"]
+        assert url.startswith("data:image/jpeg;base64,")
+        blob = base64.b64decode(url.split(",", 1)[1])
+        assert blob.startswith(b"\xff\xd8")
+        blobs.append(blob)
+    assert len(blobs) == 4
+    assert len(blobs[0]) < frames[0].stat().st_size
 
 
 def test_d3_fuse_without_prior_uses_vlm_and_missing_mass_stays_missing():
@@ -329,6 +456,15 @@ def _tiny_png(path: Path) -> Path:
             "0000000a49444154789c6360000002000154a24f9d0000000049454e44ae426082"
         )
     )
+    return path
+
+
+def _solid_png(path: Path, width: int, height: int) -> Path:
+    import cv2
+
+    image = np.zeros((height, width, 3), dtype=np.uint8)
+    if not cv2.imwrite(str(path), image, [int(cv2.IMWRITE_PNG_COMPRESSION), 0]):
+        raise RuntimeError(f"could not write {path.name}")
     return path
 
 

@@ -12,10 +12,12 @@ from tools.block_e import (
     attach_chamfer_block,
     cloth_sheet,
     collision_hulls,
+    contact_points,
     extract_object_mesh,
     filter_object_gaussians,
     publish_can,
     record_joint_sweep,
+    refresh_block_e,
     require_press_picture,
     resolve_parts,
     rope_capsules,
@@ -23,6 +25,8 @@ from tools.block_e import (
     run_generative_parts,
     score_mesh,
     soft_volume,
+    write_planar_uv,
+    write_vertex_colors,
     split_mesh,
     write_can_asset,
     write_deformable,
@@ -359,3 +363,29 @@ def test_sweep_script_refuses_bottle_and_vaseline():
     ).read_text(encoding="utf-8")
     assert 'args.obj in {"bottle", "vaseline"}' in text
     assert "return 2" in text
+
+
+def test_contact_plane_sits_on_the_lowest_z():
+    cloud = np.array([[0.0, 0.0, 1.0], [1.0, 1.0, 3.0], [0.2, 0.4, 2.0]], dtype=np.float64)
+    plane = contact_points(cloud, n=2)
+    assert plane.shape == (4, 3)
+    assert np.allclose(plane[:, 2], 1.0)
+
+
+def test_planar_uv_is_separate_from_vertex_colour():
+    mesh = {"vertices": np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.5]])}
+    coloured = write_vertex_colors(mesh, np.ones((3, 3)))
+    assert coloured["uv_atlas"] == "unstarted"
+    atlas = write_planar_uv(mesh)
+    assert atlas["uv_atlas"] == "planar"
+    assert atlas["n_uv"] == 3
+    assert mesh["uvs"].shape == (3, 2)
+
+
+def test_block_e_score_is_not_can_only(tmp_path: Path):
+    record = refresh_block_e("bottle", tmp_path)
+    assert record["object"] == "bottle"
+    assert record["achieved"] is False
+    saved = json.loads((tmp_path / "data" / "bottle" / "ingest" / "block_e.json").read_text(encoding="utf-8"))
+    assert saved["achieved"] is False
+

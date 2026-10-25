@@ -929,20 +929,17 @@ def _usda(
     tx, ty, tz = translation
     return (
         "#usda 1.0\n"
-        f'def Xform "{name}" (\n'
-        "    customData = {\n"
-        f'        string physics:material = "{physics["material"]}"\n'
-        f'        float physics:friction = {physics["friction"]}\n'
-        f'        float physics:rigidity = {physics["rigidity"]}\n'
-        f'        float physics:mass = {physics["mass_kg"]}\n'
-        f'        float physics:density = {physics["density_kg_m3"]}\n'
-        "        bool physics:learned_prior = false\n"
-        "        bool physics:heterogeneous_rigidity = false\n"
-        '        string physics:vlm_review = "not_run"\n'
-        f"{_usd_physics_notes(physics)}"
-        "    }\n"
-        ")\n"
+        f'def Xform "{name}"\n'
         "{\n"
+        f'    custom string physics:material = "{physics["material"]}"\n'
+        f'    custom float physics:friction = {physics["friction"]}\n'
+        f'    custom float physics:rigidity = {physics["rigidity"]}\n'
+        f'    custom float physics:mass = {physics["mass_kg"]}\n'
+        f'    custom float physics:density = {physics["density_kg_m3"]}\n'
+        "    custom bool physics:learned_prior = false\n"
+        "    custom bool physics:heterogeneous_rigidity = false\n"
+        '    custom string physics:vlm_review = "not_run"\n'
+        f"{_usd_physics_notes(physics)}"
         f"    double3 xformOp:translate = ({tx:.6g}, {ty:.6g}, {tz:.6g})\n"
         '    uniform token[] xformOpOrder = ["xformOp:translate"]\n'
         '    def Mesh "Body"\n'
@@ -957,19 +954,19 @@ def _usda(
 
 def _usd_physics_notes(physics: dict[str, Any]) -> str:
     """Bake stored friction numbers. learned_prior stays false in the caller."""
-    lines = ['        string physics:dropTest = "not_run"']
+    lines = ['    custom string physics:dropTest = "not_run"']
     static = physics.get("static_friction")
     if isinstance(static, (int, float)) and not isinstance(static, bool):
-        lines.insert(0, f"        float physics:staticFriction = {static}")
+        lines.insert(0, f"    custom float physics:staticFriction = {static}")
     dynamic = physics.get("dynamic_friction")
     if isinstance(dynamic, (int, float)) and not isinstance(dynamic, bool):
-        lines.append(f"        float physics:dynamicFriction = {dynamic}")
+        lines.append(f"    custom float physics:dynamicFriction = {dynamic}")
     restitution = physics.get("restitution")
     if isinstance(restitution, (int, float)) and not isinstance(restitution, bool):
-        lines.append(f"        float physics:restitution = {restitution}")
+        lines.append(f"    custom float physics:restitution = {restitution}")
     kind = physics.get("deformable_type")
     if isinstance(kind, str) and kind in {"rigid", "cloth", "rope", "soft"}:
-        lines.append(f'        string physics:deformableType = "{kind}"')
+        lines.append(f'    custom string physics:deformableType = "{kind}"')
     return "\n".join(lines) + "\n"
 
 
