@@ -30,6 +30,7 @@ _D2_FIELDS = (
 _DEFORMABLE = frozenset({"rigid", "cloth", "rope", "soft"})
 _FRICTION_KEYS = ("static_friction", "dynamic_friction", "restitution")
 ISAAC_HANG = "Isaac sim.reset is known to hang; the drop test was not run"
+DROP_NOT_SCHEDULED = "drop not scheduled for this video"
 _N_MATERIALS = 8
 _GEOM_DIM = 8
 
@@ -310,7 +311,7 @@ def write_d2_record(
     record["d2_frames"] = [str(frame) for frame in frames]
     record["drop_test"] = "not_run"
     record["slide_test"] = "not_run"
-    record["drop_test_reason"] = ISAAC_HANG
+    record["drop_test_reason"] = DROP_NOT_SCHEDULED
     return lock_learned_prior(record)
 
 

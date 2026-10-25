@@ -16,6 +16,9 @@
 - tests/test_object_block_b_report.py: a physics-vector npz is not a LangSplat codebook, and the written score keeps miou null
 
 ### Changed
+- tools/orbit_chain.py: Block D schedules a missing checkpoint, scale weight, marker-cap, and Isaac drop, and the copy count follows this run's index
+- tools/block_d.py: a D2 physics record stamps drop not scheduled for this video instead of an Isaac hang
+- tests/test_orbit_chain.py: a missing checkpoint, M4, and M4b stay not_scheduled, and reused physics.json does not claim start_d2 ran
 - tools/orbit_chain.py: Block D passes when the Block C object ply and the physics bake match, and M4 stays unmet
 - tools/orbit_chain.py: the chain Block D record stores each sub-step result, and a missing checkpoint or an unrun settle stays unachieved
 - tools/orbit_chain.py: gaussian physics rows follow prior_input.npy when that file exists, not the full-splat mask

@@ -112,23 +112,17 @@ def test_c_is_skipped_and_not_achieved(tmp_path: Path, monkeypatch: pytest.Monke
 def test_no_api_key_does_not_write_physics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     can = _can(tmp_path)
-    seen: dict = {}
-    real = oc.start_d2
+    seen: dict = {"called": False}
 
     def wrap(*args, **kwargs):
-        seen["api_key"] = kwargs.get("api_key")
-        seen["api_key_passed"] = "api_key" in kwargs
-        seen["root"] = kwargs.get("root")
-        return real(*args, **kwargs)
+        seen["called"] = True
+        raise AssertionError("the chain must not call start_d2")
 
     monkeypatch.setattr(oc, "start_d2", wrap)
     result = oc.run_orbit(can, "orbit1", tmp_path / "orbit_chain.md")
-    assert seen["api_key_passed"] is False
-    assert seen["api_key"] is None
-    root = Path(seen["root"]).resolve()
-    chain = (can / "chain").resolve()
-    assert chain == root or chain in root.parents
-    assert result["d"]["d2_status"] == "model not asked"
+    assert seen["called"] is False
+    assert result["d"]["d2_status"] == "missing"
+    assert "start_d2 returned" not in next(part["reason"] for part in result["d"]["parts"] if part["id"] == "D2")
     assert list(can.rglob("physics.json")) == []
     assert list(can.rglob("physics_material.usda")) == []
     assert list(can.rglob("gaussian_physics.npy")) == []
@@ -140,37 +134,23 @@ def test_present_key_is_not_discarded_by_empty_string(tmp_path: Path, monkeypatc
     token = "present-test-key"
     monkeypatch.setenv("OPENAI_API_KEY", token)
     can = _can(tmp_path)
-    for parts in oc._D2_FRAMES:
-        frame = can.joinpath(*parts)
-        frame.parent.mkdir(parents=True, exist_ok=True)
-        frame.write_bytes(b"frame")
-    seen: dict = {}
-    real = oc.start_d2
+    seen: dict = {"called": False}
 
-    def wrap(*args, **kwargs):
-        seen["api_key"] = kwargs.get("api_key")
-        seen["api_key_passed"] = "api_key" in kwargs
-        return real(*args, **kwargs)
-
-    def fake_ask(frames, name, bbox, api_key):
-        seen["asked_key"] = api_key
-        seen["name"] = name
-        seen["frames"] = len(frames)
-        raise OSError("stop before a network write")
+    def wrap(*_args, **_kwargs):
+        seen["called"] = True
+        raise AssertionError("the chain must not call start_d2")
 
     def block_network(*_args, **_kwargs):
         raise AssertionError("D2 test must not open a network request")
 
     monkeypatch.setattr(oc, "start_d2", wrap)
-    monkeypatch.setattr("tools.block_d._ask_start_d2", fake_ask)
     monkeypatch.setattr("urllib.request.urlopen", block_network)
     result = oc.run_orbit(can, "orbit1", tmp_path / "present.md")
-    assert seen["api_key_passed"] is False
-    assert seen["api_key"] != ""
-    assert seen["asked_key"] == token
-    assert seen["name"] == "can"
-    assert seen["frames"] == 4
-    assert result["d"]["d2_status"] == "response not usable"
+    assert seen["called"] is False
+    assert result["d"]["d2_status"] == "missing"
+    d2 = next(part for part in result["d"]["parts"] if part["id"] == "D2")
+    assert "not asked" in d2["reason"]
+    assert "start_d2 returned" not in d2["reason"]
     assert list(can.rglob("physics.json")) == []
 
 
@@ -385,14 +365,21 @@ def test_measured_d1_does_not_start_block_d(tmp_path: Path, monkeypatch: pytest.
     assert parts["D1.2"]["numbers"]["n_unassigned"] == 2
     assert parts["D1.3"]["state"] == "unstarted"
     assert parts["D1.3"]["numbers"]["prior_input"] is False
-    assert parts["D1.4"]["state"] == "unstarted"
+    assert parts["D1.4"]["state"] == "not_scheduled"
+    assert parts["D1.4"]["achieved"] is False
     assert parts["D1.4"]["numbers"]["checkpoint"] is False
     assert parts["D1.4"]["numbers"]["prior_input"] is False
-    assert "no prior_input" in parts["D1.4"]["reason"]
-    assert parts["D1.5"]["state"] == "unstarted"
+    assert parts["D1.4"]["numbers"]["learned_prior"] is False
+    assert parts["D1.4"]["reason"] == oc._CHECKPOINT_REASON
+    assert parts["D1.5"]["state"] == "not_scheduled"
+    assert parts["D1.5"]["achieved"] is False
     assert parts["D1.5"]["numbers"]["reduced"] is False
+    assert parts["M4"]["state"] == "not_scheduled"
+    assert parts["M4"]["achieved"] is False
+    assert parts["M4b"]["state"] == "not_scheduled"
+    assert parts["M4b"]["achieved"] is False
     assert parts["D2"]["state"] == "unstarted"
-    assert parts["D2"]["numbers"]["d2_status"] == "model not asked"
+    assert parts["D2"]["numbers"]["d2_status"] == "missing"
     assert parts["D2"]["numbers"]["physics_json"] is False
     assert parts["D3"]["state"] == "unstarted"
     assert parts["D3"]["numbers"]["physics_material_usda"] is False
@@ -410,21 +397,28 @@ def test_measured_d1_does_not_start_block_d(tmp_path: Path, monkeypatch: pytest.
     assert "Block D state `partial`" not in text
 
 
-def test_d14_keeps_a_present_prior_file(tmp_path: Path):
+def test_d14_keeps_a_present_prior_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     can = _can(tmp_path)
     chain = can / "chain" / "orbit1"
     chain.mkdir(parents=True)
     prior = chain / "semantics" / "prior_input.npy"
     prior.parent.mkdir(parents=True)
     np.save(prior, np.zeros((2, 40), dtype=np.float64))
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("run_learned_prior must not run without a checkpoint")
+
+    monkeypatch.setattr(oc, "run_learned_prior", fail)
     part = oc._run_d14(can, chain, None)["part"]
-    assert part["state"] == "unstarted"
+    assert part["state"] == "not_scheduled"
     assert part["achieved"] is False
     assert part["numbers"]["prior_input"] is True
     assert part["numbers"]["checkpoint"] is False
     assert part["numbers"]["learned_prior"] is False
     assert "no prior_input" not in part["reason"]
-    assert "checkpoint is missing" in part["reason"]
+    assert part["reason"] == oc._CHECKPOINT_REASON
+    assert not (can / "semantics" / "physics_prior.npz").exists()
+    assert not (chain / "semantics" / "physics_prior.npz").exists()
 
 
 def test_d12_labels_follow_a_separate_scene_mean(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -459,30 +453,43 @@ def test_d12_labels_follow_a_separate_scene_mean(tmp_path: Path, monkeypatch: py
 def test_block_d_partial_only_with_material_and_mass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     can = _can(tmp_path)
-    monkeypatch.setattr(oc, "start_d2", _fill_physics({"material": "aluminum", "learned_prior": False}))
-    material_only = oc.run_orbit(can, "orbit1", tmp_path / "material.md")
-    assert material_only["d"]["state"] == "not_started"
-    assert material_only["d"]["achieved"] is False
-    saved = json.loads((can / "chain" / "orbit1" / "physics.json").read_text(encoding="utf-8"))
-    assert saved.get("mass_kg") is None
-    monkeypatch.setattr(oc, "start_d2", _fill_physics({"mass_kg": 0.33, "learned_prior": False}))
-    mass_only = oc.run_orbit(can, "orbit1", tmp_path / "mass.md")
-    assert mass_only["d"]["state"] == "not_started"
-    assert mass_only["d"]["achieved"] is False
-    monkeypatch.setattr(
-        oc,
-        "start_d2",
-        _fill_physics({"material": "aluminum", "mass_kg": 0.33, "learned_prior": False, "drop_test": "not_run"}),
+    chain = can / "chain" / "orbit1"
+    chain.mkdir(parents=True)
+    inputs = oc._b_inputs(can, "orbit1")
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("the chain must not call start_d2")
+
+    monkeypatch.setattr(oc, "start_d2", refuse)
+    (chain / "physics.json").write_text(
+        json.dumps({"material": "aluminum", "learned_prior": False}),
+        encoding="utf-8",
     )
-    filled = oc.run_orbit(can, "orbit1", tmp_path / "filled.md")
-    assert filled["d"]["state"] == "partial"
-    assert filled["d"]["achieved"] is False
-    assert filled["d"]["learned_prior"] is False
-    physics = json.loads((can / "chain" / "orbit1" / "physics.json").read_text(encoding="utf-8"))
+    material_only = oc.run_block_d(can, "orbit1", inputs, chain)
+    assert material_only["record"]["state"] == "not_started"
+    assert material_only["record"]["achieved"] is False
+    saved = json.loads((chain / "physics.json").read_text(encoding="utf-8"))
+    assert saved.get("mass_kg") is None
+    (chain / "physics.json").write_text(json.dumps({"mass_kg": 0.33, "learned_prior": False}), encoding="utf-8")
+    mass_only = oc.run_block_d(can, "orbit1", inputs, chain)
+    assert mass_only["record"]["state"] == "not_started"
+    assert mass_only["record"]["achieved"] is False
+    (chain / "physics.json").write_text(
+        json.dumps({"material": "aluminum", "mass_kg": 0.33, "learned_prior": False, "drop_test": "not_run"}),
+        encoding="utf-8",
+    )
+    filled = oc.run_block_d(can, "orbit1", inputs, chain)
+    assert filled["record"]["state"] == "partial"
+    assert filled["record"]["achieved"] is False
+    assert filled["record"]["learned_prior"] is False
+    physics = json.loads((chain / "physics.json").read_text(encoding="utf-8"))
     assert physics["material"] == "aluminum"
     assert physics["mass_kg"] == 0.33
     assert physics["learned_prior"] is False
-    text = (tmp_path / "filled.md").read_text(encoding="utf-8")
+    assert physics["drop_test"] == "not_run"
+    assert physics["drop_test_reason"] == "drop not scheduled for this video"
+    assert physics.get("settle_within_2s") is not True
+    text = oc.render_block(filled["record"])
     assert "Block D state `partial` achieved: false." in text
     assert "achieved: true" not in text
 
@@ -519,15 +526,112 @@ def test_relaxed_bake_passes_when_ply_rows_match(tmp_path: Path):
     assert record["bake"]["settle_within_2s"] is None
     parts = {part["id"]: part for part in record["parts"]}
     assert parts["D1.3"]["achieved"] is True
+    assert "Block C object ply" in parts["D1.3"]["reason"]
+    assert "written from the splat" not in parts["D1.3"]["reason"]
     assert parts["D2"]["achieved"] is True
+    assert "reused" in parts["D2"]["reason"]
+    assert "not asked" in parts["D2"]["reason"]
+    assert "start_d2 returned" not in parts["D2"]["reason"]
     assert parts["D3"]["achieved"] is True
+    assert parts["D3"]["numbers"]["drop_test"] == "not_run"
+    assert parts["D3"]["numbers"]["drop_test_reason"] == "drop not scheduled for this video"
+    assert parts["D3"]["numbers"]["settle_within_2s"] is None
+    assert parts["D1.4"]["state"] == "not_scheduled"
     assert parts["D1.4"]["achieved"] is False
+    assert parts["D1.5"]["state"] == "not_scheduled"
+    assert parts["D1.5"]["achieved"] is False
+    assert parts["M4"]["state"] == "not_scheduled"
     assert parts["M4"]["achieved"] is False
+    assert parts["M4b"]["state"] == "not_scheduled"
+    assert parts["M4b"]["achieved"] is False
     short = can / "objects" / "can" / "orbit1" / "object.ply"
     short.write_text("ply\nformat ascii 1.0\nelement vertex 2\nend_header\n", encoding="utf-8")
     missed = oc.run_block_d_from_block_c(can, ("orbit1",))[0]
     assert missed["achieved"] is False
     assert missed["m4_met"] is False
+
+
+def test_block_c_rerun_uses_this_runs_labels_and_does_not_invent_scene_mean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    can = _can(tmp_path)
+    book = json.loads((can / "codebook.json").read_text(encoding="utf-8"))
+    book["n_copied"] = 99
+    (can / "codebook.json").write_text(json.dumps(book), encoding="utf-8")
+    orbit = can / "objects" / "can" / "orbit1"
+    orbit.mkdir(parents=True)
+    (orbit / "object.ply").write_text("ply\nformat ascii 1.0\nelement vertex 4\nend_header\n", encoding="utf-8")
+    chain = can / "chain" / "orbit1"
+    (chain / "semantics").mkdir(parents=True)
+    np.save(chain / "semantics" / "prior_input.npy", np.zeros((4, 40), dtype=np.float64))
+    (chain / "physics.json").write_text(
+        json.dumps(
+            {
+                "material": "aluminum",
+                "mass_kg": 0.016,
+                "static_friction": 0.3,
+                "rigidity": 0.85,
+                "learned_prior": False,
+                "drop_test": "not_run",
+                "drop_test_reason": "Isaac sim.reset is known to hang; the drop test was not run",
+                "mass_check": {"checked": False, "reason": "not weighed"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    np.savez(
+        can / "codebook_gaussians_orbit1.npz",
+        object_vector=np.array([1.0, 2.0], dtype=np.float32),
+        scene_mean=np.array([], dtype=np.float32),
+    )
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("start_d2 and run_learned_prior must not run")
+
+    monkeypatch.setattr(oc, "start_d2", refuse)
+    monkeypatch.setattr(oc, "run_learned_prior", refuse)
+    record = oc.run_block_d_from_block_c(can, ("orbit1",))[0]
+    parts = {part["id"]: part for part in record["parts"]}
+    assert record["achieved"] is True
+    assert record["m4_met"] is False
+    assert record["learned_prior"] is False
+    assert parts["D1.1"]["numbers"]["n_copied"] == 2
+    assert parts["D1.1"]["numbers"]["n_copied"] != 99
+    assert parts["D1.2"]["numbers"]["n_object"] == 2
+    assert parts["D1.2"]["numbers"]["n_scene"] == 0
+    assert parts["D1.2"]["numbers"]["n_unassigned"] == 2
+    assert parts["D1.2"]["numbers"]["scene_mean_measured"] is False
+    assert parts["D1.4"]["state"] == "not_scheduled"
+    assert parts["D1.5"]["state"] == "not_scheduled"
+    assert parts["M4"]["state"] == "not_scheduled"
+    assert parts["M4"]["reason"] == "a vision mass is an unchecked estimate."
+    assert parts["M4b"]["state"] == "not_scheduled"
+    assert parts["D3"]["numbers"]["drop_test_reason"] == "drop not scheduled for this video"
+    saved = json.loads((chain / "physics.json").read_text(encoding="utf-8"))
+    assert saved["mass_kg"] == 0.016
+    assert saved["drop_test_reason"] == "drop not scheduled for this video"
+    assert "sim.reset" not in (chain / "physics.json").read_text(encoding="utf-8")
+    assert saved.get("settle_within_2s") is not True
+    assert not (chain / "semantics" / "physics_prior.npz").exists()
+    np.savez(
+        can / "codebook_gaussians_orbit1.npz",
+        object_vector=np.array([1.0, 2.0], dtype=np.float32),
+        scene_mean=np.array([1.0, 2.0], dtype=np.float32),
+    )
+    copied = oc.run_block_d_from_block_c(can, ("orbit1",))[0]
+    copied_d12 = next(part for part in copied["parts"] if part["id"] == "D1.2")
+    assert copied_d12["numbers"]["scene_mean_measured"] is False
+    assert copied_d12["numbers"]["n_scene"] == 0
+    np.savez(
+        can / "codebook_gaussians_orbit1.npz",
+        object_vector=np.array([1.0, 2.0], dtype=np.float32),
+        scene_mean=np.array([0.4, 0.5], dtype=np.float32),
+    )
+    separate = oc.run_block_d_from_block_c(can, ("orbit1",))[0]
+    separate_d12 = next(part for part in separate["parts"] if part["id"] == "D1.2")
+    assert separate_d12["numbers"]["scene_mean_measured"] is True
+    assert separate_d12["numbers"]["n_scene"] == 2
+    assert separate_d12["numbers"]["n_unassigned"] == 0
 
 
 def test_refuses_bottle_and_vaseline(tmp_path: Path):

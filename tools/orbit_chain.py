@@ -4,10 +4,11 @@ Block C is not executed here. The C line is copied from ingest/block_c.json
 when that file has the orbit. A missing file stays skipped and is not a pass.
 SAM, COLMAP, and splatfacto are not rerun. Outputs go to data/can/chain/orbitN/.
 This module does not call publish_can or refresh the shared data/can scores.
-A skipped check is never a pass. learned_prior stays false. M4 stays unmet
-without weighed objects. Block D passes when the Block C object ply, the prior
-rows, and the physics bake match. A missing checkpoint or Isaac settle does not
-fail that bake.
+A skipped or not_scheduled check is never a pass. learned_prior stays false.
+M4 stays unmet without a scale weight. A missing checkpoint, a marker-cap
+check, and an Isaac drop are not scheduled for this video and do not fail the
+bake. Block D passes when the Block C object ply, the prior rows, and the
+physics bake match.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ import numpy as np
 from tools.block_d import (
     apply_scene_mean,
     fuse_physics,
+    DROP_NOT_SCHEDULED,
     reduce_prior,
     run_learned_prior,
     start_d2,
@@ -56,6 +58,9 @@ HEADER = (
     "M4 stays unmet without weighed objects. learned_prior stays false.\n"
     "\n"
 )
+_CHECKPOINT_REASON = "checkpoint is a project weight and is not produced by this video."
+_M4_REASON = "a vision mass is an unchecked estimate."
+_M4B_REASON = "M4b is a marker-cap breakaway and is not scheduled for this object."
 _D2_FRAMES = (
     ("iou", "orbit1", "frame_00167.png"),
     ("iou", "orbit2", "frame_00001.png"),
@@ -218,10 +223,11 @@ def run_block_d(
         raise RuntimeError("Block D must read this orbit's Block B mask")
     codebook_path = inputs["codebook"]
     splat = inputs["splat"]
-    codebook = _load(codebook_path)
+    codebook = _codebook_for_d12(can, orbit, _load(codebook_path))
     obj = _load(inputs["object"])
     inside = np.load(mask_path) if mask_path.is_file() else None
     d12 = _run_d12(chain, inside, codebook)
+    _note_splat_and_ply(d12["part"], can, orbit)
     prior_status, d2_status = _object_dir_writers(
         chain,
         splat,
@@ -230,18 +236,20 @@ def run_block_d(
         _bbox(obj),
     )
     d14 = _run_d14(can, chain, inside)
-    d15 = _run_d15(chain, inside, d14.get("p_i"))
+    d15 = _run_d15(chain, inside, d14.get("p_i"), checkpoint_present=d14.get("checkpoint_present") is True)
     d3 = _run_d3(chain, d2_status, mask_path)
+    physics = _load(chain / "physics.json") if (chain / "physics.json").is_file() else {}
+    labeled = d12["part"]["numbers"].get("n_object")
     parts = [
-        _d11_part(codebook),
+        _d11_part(codebook, labeled if isinstance(labeled, int) else None),
         d12["part"],
-        _d13_part(chain, prior_status),
+        _d13_part(chain, _mark_ply_match(can, orbit, chain, prior_status)),
         d14["part"],
         d15,
         _d2_part(chain, d2_status),
         d3,
-        _unmeasured("M4", "M4 needs weighed objects, mass error, material accuracy, and settle telemetry."),
-        _unmeasured("M4b", "M4b marker-cap breakaway force was not measured."),
+        _m4_part(physics),
+        _m4b_part(),
     ]
     record = _finish_d_record(can, orbit, chain, parts, d2_status, obj.get("covers_room") is True)
     path = _write_record(chain / "ingest" / "block_d.json", record)
@@ -446,11 +454,166 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _saved_scene_mean(can: Path, orbit: str, vector: Any) -> list[float] | None:
+    """Return a stored scene-mean vector that is not a copy of the object vector."""
+    if not isinstance(vector, list) or not vector:
+        return None
+    obj = np.asarray(vector, dtype=float).reshape(-1)
+    paths = [
+        can / f"codebook_gaussians_{orbit}.npz",
+        can / "semantics" / orbit / "features.codebook.npz",
+        can / "semantics" / "features.physics_vector.npz",
+    ]
+    if orbit == "orbit1":
+        paths.insert(0, can / "codebook_gaussians.npz")
+    for path in paths:
+        if not path.is_file():
+            continue
+        try:
+            with np.load(path) as book:
+                if "scene_mean" not in book.files:
+                    continue
+                scene = np.asarray(book["scene_mean"], dtype=float)
+        except (OSError, ValueError):
+            continue
+        if scene.ndim != 1 or scene.size == 0 or not np.isfinite(scene).all():
+            continue
+        if scene.shape != obj.shape or bool(np.allclose(scene, obj)):
+            continue
+        return [float(value) for value in scene]
+    return None
+
+
+def _codebook_for_d12(can: Path, orbit: str, codebook: dict[str, Any]) -> dict[str, Any]:
+    """Use a scene mean already stored on disk. Do not invent one or copy the object vector."""
+    if resolve_scene_mean(codebook).get("measured") is True:
+        return codebook
+    found = _saved_scene_mean(can, orbit, codebook.get("vector"))
+    if found is None:
+        return codebook
+    merged = dict(codebook)
+    merged["scene_mean"] = found
+    merged["scene_mean_measured"] = True
+    if resolve_scene_mean(merged).get("measured") is not True:
+        return codebook
+    return merged
+
+
+def _note_splat_and_ply(part: dict[str, Any], can: Path, orbit: str) -> None:
+    """Record the full-splat index and the Block C ply as different counts."""
+    from tools.step02_splatfacto import count_gaussians
+
+    ply = _block_c_object_ply(can, orbit)
+    ply_n = count_gaussians(ply) if ply.is_file() else None
+    numbers = part["numbers"]
+    n = numbers.get("n")
+    n_object = numbers.get("n_object")
+    if isinstance(n, int):
+        numbers["n_splat"] = n
+    if isinstance(ply_n, int):
+        numbers["ply_vertices"] = ply_n
+    if not isinstance(ply_n, int) or not isinstance(n, int):
+        return
+    if n == ply_n and n_object == ply_n:
+        return
+    note = (
+        f" The index labels the full splat ({n} Gaussians, {n_object} object labels). "
+        f"The Block C object ply has {ply_n} vertices. The bake uses the ply."
+    )
+    reason = str(part.get("reason") or "")
+    if "Block C object ply has" not in reason:
+        part["reason"] = reason + note
+
+
+def _mark_ply_match(can: Path, orbit: str, chain: Path, status: dict[str, Any]) -> dict[str, Any]:
+    from tools.step02_splatfacto import count_gaussians
+
+    marked = dict(status)
+    ply = _block_c_object_ply(can, orbit)
+    ply_n = count_gaussians(ply) if ply.is_file() else None
+    prior = chain / "semantics" / "prior_input.npy"
+    prior_n = int(np.load(prior, mmap_mode="r").shape[0]) if prior.is_file() else None
+    marked["ply_vertices"] = ply_n
+    marked["matches_object_ply"] = ply_n is not None and prior_n == ply_n
+    return marked
+
+
+def _weighed(physics: dict[str, Any]) -> bool:
+    if physics.get("weighed_kg") is not None:
+        return True
+    check = physics.get("mass_check")
+    return isinstance(check, dict) and check.get("checked") is True
+
+
+def _m4_part(physics: dict[str, Any]) -> dict[str, Any]:
+    if not _weighed(physics):
+        return _step(
+            "M4",
+            "not_scheduled",
+            False,
+            {"achieved": False, "m4_met": False, "mass_checked": False, "learned_prior": False},
+            _M4_REASON,
+        )
+    return _step(
+        "M4",
+        "unmeasured",
+        False,
+        {
+            "achieved": False,
+            "m4_met": False,
+            "mass_checked": True,
+            "weighed_kg": physics.get("weighed_kg"),
+            "learned_prior": False,
+        },
+        "A scale weight is present. M4 still needs the weighed set, mass error, material accuracy, and settle telemetry.",
+    )
+
+
+def _m4b_part() -> dict[str, Any]:
+    return _step(
+        "M4b",
+        "not_scheduled",
+        False,
+        {"achieved": False, "learned_prior": False},
+        _M4B_REASON,
+    )
+
+
+def _schedule_drop(path: Path) -> None:
+    """Replace a hang stamp with the video schedule. Do not invent telemetry or change the mass."""
+    physics = _load(path)
+    if not physics or physics.get("drop_test") == "ran":
+        return
+    if physics.get("settle_within_2s") is True:
+        raise GateError("settle_within_2s cannot be true without telemetry")
+    if physics.get("learned_prior") is True:
+        raise GateError("learned_prior cannot be true")
+    updated = dict(physics)
+    updated["drop_test"] = "not_run"
+    updated["drop_test_reason"] = DROP_NOT_SCHEDULED
+    if "settle_within_2s" in updated and updated.get("settle_within_2s") is not None:
+        updated["settle_within_2s"] = None
+    if updated != physics:
+        _dump(path, updated)
+
+
 def _run_d12(chain: Path, inside: np.ndarray | None, codebook: dict[str, Any]) -> dict[str, Any]:
     resolved = resolve_scene_mean(codebook) if codebook else {"measured": False, "reason": "no codebook vector"}
     vector = codebook.get("vector")
     scene = codebook.get("scene_mean")
     separate = resolved.get("measured") is True and isinstance(vector, list) and isinstance(scene, list)
+    _dbg200(
+        "E",
+        "tools/orbit_chain.py:_run_d12",
+        "d12 branch",
+        {
+            "chain": chain.name,
+            "branch": "separate" if inside is not None and separate else ("vector_only" if inside is not None and isinstance(vector, list) else "unstarted"),
+            "scene_mean": isinstance(scene, list),
+            "scene_mean_measured": codebook.get("scene_mean_measured") is True,
+            "resolved": resolved.get("measured") is True,
+        },
+    )
     assigned = None
     if inside is not None and separate:
         obj = np.asarray(vector, dtype=float)
@@ -495,28 +658,27 @@ def _object_dir_writers(
     frames: list[Path],
     bbox: dict[str, Any],
 ) -> tuple[dict[str, Any], str]:
-    """Call writers that hard-code object_dir, then keep files only inside the chain folder."""
+    """Write the prior inside the chain folder and reuse an existing vision physics.json.
+
+    start_d2 is not called. A missing physics.json stays missing. An existing file is not deleted.
+    """
+    del frames, bbox
     root = chain / "_writer_root"
     produced = root / "data" / "can"
     produced.mkdir(parents=True, exist_ok=True)
     _require_inside(produced, chain)
     prior_status: dict[str, Any] = {"state": "unstarted", "file": None}
-    d2_status = "model not asked"
     try:
         prior_status = write_prior_input("can", root, ply=splat, vectors=vectors)
-        d2_status = start_d2("can", frames, "can", bbox, root=root)
         _copy_produced(produced, chain)
     finally:
         if root.exists():
             shutil.rmtree(root, ignore_errors=True)
-    if d2_status != "filled":
-        stale = chain / "physics.json"
-        if stale.is_file():
-            stale.unlink()
     if prior_status.get("state") != "written":
         stale_prior = chain / "semantics" / "prior_input.npy"
         if stale_prior.is_file() and not splat.is_file():
             stale_prior.unlink()
+    d2_status = "reused" if (chain / "physics.json").is_file() else "missing"
     return prior_status, d2_status
 
 
@@ -603,6 +765,32 @@ def _finish_d_record(
     return record
 
 
+def _dbg200(
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict[str, Any],
+    run_id: str = "pre-fix",
+) -> None:
+    # #region agent log
+    try:
+        payload = {
+            "sessionId": "200a3a",
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(__import__("time").time() * 1000),
+        }
+        path = Path(__file__).resolve().parents[1] / "debug-200a3a.log"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload) + "\n")
+    except Exception:
+        pass
+    # #endregion
+
+
 def run_block_d_from_block_c(can: Path | None = None, orbits: tuple[str, ...] = ORBITS) -> list[dict[str, Any]]:
     """Bake Block D from each orbit's Block C object ply. Does not call the model or reset the chain."""
     can = _require_can(Path(can) if can is not None else Path("data/can"))
@@ -610,29 +798,71 @@ def run_block_d_from_block_c(can: Path | None = None, orbits: tuple[str, ...] = 
     for orbit in orbits:
         orbit = _orbit(orbit)
         chain = _require_chain(can, can / "chain" / orbit)
-        codebook = _load(can / ("codebook.json" if orbit == "orbit1" else f"codebook_{orbit}.json"))
+        codebook = _codebook_for_d12(
+            can,
+            orbit,
+            _load(can / ("codebook.json" if orbit == "orbit1" else f"codebook_{orbit}.json")),
+        )
         mask_path = can / "masks" / orbit / "gaussian_in_mask.npy"
         inside = np.load(mask_path) if mask_path.is_file() else None
         d12 = _run_d12(chain, inside, codebook)
+        _note_splat_and_ply(d12["part"], can, orbit)
         d14 = _run_d14(can, chain, inside)
-        d15 = _run_d15(chain, inside, d14.get("p_i"))
-        status = "filled" if (chain / "physics.json").is_file() else "missing"
+        d15 = _run_d15(chain, inside, d14.get("p_i"), checkpoint_present=d14.get("checkpoint_present") is True)
+        status = "reused" if (chain / "physics.json").is_file() else "missing"
         d3 = _run_d3(chain, status, mask_path)
+        physics = _load(chain / "physics.json") if (chain / "physics.json").is_file() else {}
+        _dbg200(
+            "C",
+            "tools/orbit_chain.py:run_block_d_from_block_c",
+            "m4 appended unmeasured",
+            {
+                "chain": chain.name,
+                "mass_checked": (physics.get("mass_check") or {}).get("checked") is True,
+                "weighed_present": physics.get("weighed_kg") is not None,
+                "m4_caller": "not_scheduled",
+                "m4b_caller": "not_scheduled",
+            },
+        )
         prior_state = "written" if (chain / "semantics" / "prior_input.npy").is_file() else "unstarted"
+        labeled = d12["part"]["numbers"].get("n_object")
         parts = [
-            _d11_part(codebook),
+            _d11_part(codebook, labeled if isinstance(labeled, int) else None),
             d12["part"],
-            _d13_part(chain, {"state": prior_state}),
+            _d13_part(chain, _mark_ply_match(can, orbit, chain, {"state": prior_state})),
             d14["part"],
             d15,
             _d2_part(chain, status),
             d3,
-            _unmeasured("M4", "M4 needs weighed objects, mass error, material accuracy, and settle telemetry."),
-            _unmeasured("M4b", "M4b marker-cap breakaway force was not measured."),
+            _m4_part(physics),
+            _m4b_part(),
         ]
         record = _finish_d_record(can, orbit, chain, parts, status, False)
         path = _write_record(chain / "ingest" / "block_d.json", record)
-        saved.append(_load(path))
+        written = _load(path)
+        by_id = {part["id"]: part for part in written.get("parts") or []}
+        _dbg200(
+            "F",
+            "tools/orbit_chain.py:run_block_d_from_block_c",
+            "post-fix schedule",
+            {
+                "chain": chain.name,
+                "block_achieved": written.get("achieved") is True,
+                "m4_met": written.get("m4_met") is True,
+                "learned_prior": written.get("learned_prior") is True,
+                "n_copied": (by_id.get("D1.1") or {}).get("numbers", {}).get("n_copied"),
+                "d2_reason": (by_id.get("D2") or {}).get("reason"),
+                "d13_reason": (by_id.get("D1.3") or {}).get("reason"),
+                "drop_test_reason": ((by_id.get("D3") or {}).get("numbers") or {}).get("drop_test_reason"),
+                "states": {
+                    part["id"]: {"state": part.get("state"), "achieved": part.get("achieved") is True}
+                    for part in written.get("parts") or []
+                    if isinstance(part, dict)
+                },
+            },
+            run_id="post-fix",
+        )
+        saved.append(written)
     return saved
 
 
@@ -641,31 +871,41 @@ def _run_d14(can: Path, chain: Path, inside: np.ndarray | None) -> dict[str, Any
     prior = chain / "semantics" / "prior_input.npy"
     checkpoint = _checkpoint(can, chain)
     prior_exists = prior.is_file()
-    missing_reason = (
-        "learned prior checkpoint is missing"
-        if prior_exists
-        else "No checkpoint and no prior_input.npy. run_learned_prior was not called. learned_prior stays false."
+    _dbg200(
+        "A",
+        "tools/orbit_chain.py:_run_d14",
+        "d14 checkpoint",
+        {
+            "chain": chain.name,
+            "prior_exists": prior_exists,
+            "checkpoint": checkpoint is not None,
+            "gate": "missing checkpoint" if checkpoint is None else "checkpoint present",
+        },
     )
-    part = _step(
-        "D1.4",
-        "unstarted",
-        False,
-        {"learned_prior": False, "checkpoint": False, "prior_input": prior_exists},
-        missing_reason,
-    )
-    if not prior_exists or checkpoint is None:
-        if prior_exists and checkpoint is None:
-            try:
-                run_learned_prior(np.load(prior), None)
-            except GateError as exc:
-                part = _step(
-                    "D1.4",
-                    "unstarted",
-                    False,
-                    {"learned_prior": False, "checkpoint": False, "prior_input": True, "raised": True},
-                    str(exc),
-                )
-        return {"part": part, "p_i": None}
+    if checkpoint is None:
+        return {
+            "part": _step(
+                "D1.4",
+                "not_scheduled",
+                False,
+                {"learned_prior": False, "checkpoint": False, "prior_input": prior_exists},
+                _CHECKPOINT_REASON,
+            ),
+            "p_i": None,
+            "checkpoint_present": False,
+        }
+    if not prior_exists:
+        return {
+            "part": _step(
+                "D1.4",
+                "unstarted",
+                False,
+                {"learned_prior": False, "checkpoint": True, "prior_input": False},
+                "No prior_input.npy. The forward was not run.",
+            ),
+            "p_i": None,
+            "checkpoint_present": True,
+        }
     try:
         ran = run_learned_prior(np.load(prior), checkpoint)
     except GateError as exc:
@@ -678,6 +918,7 @@ def _run_d14(can: Path, chain: Path, inside: np.ndarray | None) -> dict[str, Any
                 str(exc),
             ),
             "p_i": None,
+            "checkpoint_present": True,
         }
     if ran.get("learned_prior") is True:
         raise GateError("learned_prior cannot be true")
@@ -690,11 +931,38 @@ def _run_d14(can: Path, chain: Path, inside: np.ndarray | None) -> dict[str, Any
             "Checkpoint forward ran. learned_prior stays false.",
         ),
         "p_i": ran.get("p_i"),
+        "checkpoint_present": True,
     }
 
 
-def _run_d15(chain: Path, inside: np.ndarray | None, p_i: Any) -> dict[str, Any]:
+def _run_d15(
+    chain: Path,
+    inside: np.ndarray | None,
+    p_i: Any,
+    checkpoint_present: bool = False,
+) -> dict[str, Any]:
     dest = chain / "semantics" / "prior_reduced.json"
+    _dbg200(
+        "B",
+        "tools/orbit_chain.py:_run_d15",
+        "d15 gate",
+        {
+            "chain": chain.name,
+            "p_i": isinstance(p_i, dict),
+            "inside": inside is not None,
+            "gate": "no p_i" if not isinstance(p_i, dict) or inside is None else "reduce",
+        },
+    )
+    if not checkpoint_present:
+        if dest.is_file():
+            dest.unlink()
+        return _step(
+            "D1.5",
+            "not_scheduled",
+            False,
+            {"learned_prior": False, "reduced": False},
+            _CHECKPOINT_REASON,
+        )
     if not isinstance(p_i, dict) or inside is None:
         if dest.is_file():
             dest.unlink()
@@ -729,7 +997,7 @@ def _run_d3(chain: Path, d2_status: str, mask_path: Path) -> dict[str, Any]:
     physics_path = chain / "physics.json"
     usda = chain / "physics_material.usda"
     gauss = chain / "gaussian_physics.npy"
-    wrote = d2_status == "filled" and physics_path.is_file()
+    wrote = d2_status in {"filled", "reused"} and physics_path.is_file()
     if not wrote:
         return _step(
             "D3",
@@ -740,14 +1008,35 @@ def _run_d3(chain: Path, d2_status: str, mask_path: Path) -> dict[str, Any]:
                 "physics_material_usda": False,
                 "gaussian_physics_npy": False,
                 "drop_test": "not_run",
+                "drop_test_reason": DROP_NOT_SCHEDULED,
                 "settle_within_2s": None,
                 "learned_prior": False,
             },
-            "D2 did not write physics.json, so fuse, USD, and gaussian_physics.npy were not created.",
+            "No vision physics.json, so fuse, USD, and gaussian_physics.npy were not created. "
+            + DROP_NOT_SCHEDULED
+            + ".",
         )
     physics = _load(physics_path)
     if physics.get("learned_prior") is True:
         raise GateError("learned_prior cannot be true")
+    settle = physics.get("settle_within_2s")
+    _dbg200(
+        "D",
+        "tools/orbit_chain.py:_run_d3",
+        "d3 settle",
+        {
+            "chain": chain.name,
+            "drop_test": physics.get("drop_test") or "not_run",
+            "drop_reason": physics.get("drop_test_reason"),
+            "settle": settle,
+            "isaac_called": False,
+            "scheduled_reason": DROP_NOT_SCHEDULED,
+        },
+    )
+    if settle is True:
+        raise GateError("settle_within_2s cannot be true without telemetry")
+    _schedule_drop(physics_path)
+    physics = _load(physics_path)
     fused = fuse_physics(None, physics, None)
     if fused.get("learned_prior") is True:
         raise GateError("learned_prior cannot be true")
@@ -756,9 +1045,6 @@ def _run_d3(chain: Path, d2_status: str, mask_path: Path) -> dict[str, Any]:
     prior_rows = int(np.load(prior_path, mmap_mode="r").shape[0]) if prior_path.is_file() else 0
     n_rows = prior_rows or (int(np.load(mask_path).size) if mask_path.is_file() else 0)
     write_gaussian_physics(gauss, n_rows, None, physics)
-    settle = physics.get("settle_within_2s")
-    if settle is True:
-        raise GateError("settle_within_2s cannot be true without telemetry")
     return _step(
         "D3",
         "partial",
@@ -767,30 +1053,39 @@ def _run_d3(chain: Path, d2_status: str, mask_path: Path) -> dict[str, Any]:
             "physics_json": True,
             "physics_material_usda": usda.is_file(),
             "gaussian_physics_npy": gauss.is_file(),
-            "drop_test": physics.get("drop_test") or "not_run",
-            "settle_within_2s": settle,
+            "drop_test": "not_run",
+            "drop_test_reason": DROP_NOT_SCHEDULED,
+            "settle_within_2s": None,
             "learned_prior": False,
         },
-        "Fused the VLM record. Isaac settle was not run.",
+        "Fused the VLM record. " + DROP_NOT_SCHEDULED + ".",
     )
 
 
-def _d11_part(codebook: dict[str, Any]) -> dict[str, Any]:
+def _d11_part(codebook: dict[str, Any], labeled: int | None = None) -> dict[str, Any]:
     vector = codebook.get("vector")
     dim = len(vector) if isinstance(vector, list) else None
+    stale = codebook.get("n_copied")
+    copied = labeled if isinstance(labeled, int) else stale
+    reason = "Object vector already on disk. DINOv2 and OpenCLIP were not rerun. learned_prior stays false."
+    if isinstance(labeled, int) and stale not in (None, labeled):
+        reason = (
+            "Object vector already on disk. n_copied is the object-label count on the index written this run. "
+            "DINOv2 and OpenCLIP were not rerun. learned_prior stays false."
+        )
     return _step(
         "D1.1",
         "measured" if dim else "unstarted",
         False,
         {
             "dim": dim,
-            "n_copied": codebook.get("n_copied"),
+            "n_copied": copied,
             "n_gaussians": codebook.get("n_gaussians"),
             "dinov2": codebook.get("dinov2") is True,
             "openclip": codebook.get("openclip") is True,
             "learned_prior": False,
         },
-        "Object vector already on disk. DINOv2 and OpenCLIP were not rerun. learned_prior stays false.",
+        reason,
     )
 
 
@@ -805,6 +1100,10 @@ def _d13_part(chain: Path, status: dict[str, Any]) -> dict[str, Any]:
         array = np.load(path)
         numbers["rows"] = int(array.shape[0])
         numbers["cols"] = int(array.shape[1]) if array.ndim == 2 else None
+    if status.get("ply_vertices") is not None:
+        numbers["ply_vertices"] = status.get("ply_vertices")
+    if status.get("matches_object_ply") is True:
+        numbers["matches_object_ply"] = True
     achieved = False
     if path.is_file():
         sidecar = chain / "semantics" / "prior_input.json"
@@ -822,6 +1121,8 @@ def _d13_part(chain: Path, status: dict[str, Any]) -> dict[str, Any]:
 def _d13_reason(path: Path, status: dict[str, Any]) -> str:
     """A missing prior names the real gap. A present splat is not called missing."""
     if path.is_file():
+        if status.get("matches_object_ply") is True:
+            return "prior_input.npy matches the Block C object ply."
         return "prior_input.npy written from the splat."
     detail = str(status.get("reason") or "").strip()
     if detail in {"", "assigned vectors are missing"}:
@@ -836,8 +1137,14 @@ def _d2_part(chain: Path, d2_status: str) -> dict[str, Any]:
     path = chain / "physics.json"
     physics = _load(path) if path.is_file() else {}
     achieved = physics.get("achieved") is True if path.is_file() else False
-    if physics.get("mass_kg") is not None and d2_status != "filled":
+    if physics.get("mass_kg") is not None and d2_status not in {"filled", "reused"}:
         raise GateError("a guessed mass was written without a VLM fill")
+    if d2_status == "reused":
+        reason = "Existing VLM physics.json was reused. The model was not asked."
+    elif d2_status in {"missing", "model not asked"}:
+        reason = "No existing VLM physics.json. The model was not asked."
+    else:
+        reason = f"start_d2 returned {d2_status}."
     return _step(
         "D2",
         "measured" if path.is_file() and physics.get("mass_kg") is not None else "unstarted",
@@ -849,9 +1156,7 @@ def _d2_part(chain: Path, d2_status: str) -> dict[str, Any]:
             "mass_kg": physics.get("mass_kg"),
             "learned_prior": False,
         },
-        "start_d2 returned model not asked. No guessed mass was written."
-        if d2_status == "model not asked"
-        else f"start_d2 returned {d2_status}.",
+        reason,
     )
 
 
@@ -1503,7 +1808,7 @@ def _f_block_state(folder: Path, parts: list[dict[str, Any]]) -> str:
 def _roll_state(parts: list[dict[str, Any]]) -> str:
     states = [str(part.get("state")) for part in parts]
     active = {"measured", "partial", "written", "ran"}
-    idle = {"unstarted", "skipped", "not_run", "unmeasured", "not_started"}
+    idle = {"unstarted", "skipped", "not_run", "unmeasured", "not_started", "not_scheduled"}
     if any(item in active for item in states) and any(item in idle for item in states):
         return "partial"
     if states and all(item in idle for item in states):
