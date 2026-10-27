@@ -205,6 +205,51 @@ def test_missing_world_t_leaves_f1_unachieved(tmp_path: Path, monkeypatch: pytes
     assert result["f"]["achieved"] is False
 
 
+def test_mesh_and_physics_write_one_body_scene(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    can = _can(tmp_path)
+    chain = can / "chain" / "orbit1"
+    _chain_mesh_physics(chain)
+    result = oc.run_block_f(can, "orbit1", chain)
+    urdf = (chain / "asset.urdf").read_text(encoding="utf-8")
+    usda = (chain / "asset.usda").read_text(encoding="utf-8")
+    scene = (chain / "scene.usda").read_text(encoding="utf-8")
+    assert "<joint" not in urdf
+    assert "PhysicsRevoluteJoint" not in usda
+    assert "PhysicsPrismaticJoint" not in usda
+    assert "PhysicsDriveAPI" not in usda
+    assert "@asset.usda@" in scene
+    assert "Franka" not in scene
+    assert (chain / "scene.usdz").is_file()
+    f3 = next(part for part in result["record"]["parts"] if part["id"] == "F3")
+    assert f3["numbers"]["scene_usdz"] is True
+    assert f3["achieved"] is False
+    assert result["record"]["achieved"] is False
+    assert result["record"]["learned_prior"] is False
+    m7 = next(part for part in result["record"]["parts"] if part["id"] == "M7")
+    assert m7["state"] == "unmeasured"
+    assert m7["achieved"] is False
+    report = json.loads((chain / "inspection_report.json").read_text(encoding="utf-8"))
+    assert report["state"] == "not_run"
+    assert report.get("settle_within_2s") is not True
+    assert (can / "asset.urdf").read_text(encoding="utf-8") == "sentinel-urdf\n"
+
+
+def test_missing_parts_does_not_invent_asset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    can = _can(tmp_path)
+    chain = can / "chain" / "orbit1"
+    _chain_mesh_physics(chain, parts=False)
+    result = oc.run_block_f(can, "orbit1", chain)
+    assert not (chain / "asset.usda").exists()
+    assert not (chain / "asset.urdf").exists()
+    assert not (chain / "scene.usdz").exists()
+    f3 = next(part for part in result["record"]["parts"] if part["id"] == "F3")
+    assert f3["achieved"] is False
+    assert "ingest/parts.json is absent" in f3["reason"]
+    assert result["record"]["achieved"] is False
+
+
 def test_achieved_false_is_not_rendered_as_achieved(tmp_path: Path):
     path = tmp_path / "block_f.json"
     path.write_text(
@@ -345,6 +390,250 @@ def test_f1_copies_c1_world_pose(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert saved["translation"] == [1.0, 2.0, 3.0]
     assert result["record"]["achieved"] is False
     assert oc.copy_c1_pose(can, "orbit1", chain) == chain / "world_T_object.json"
+
+
+def _square_ply(path: Path, x: float, z: float) -> None:
+    verts = (
+        (x - 0.5, -0.5, z),
+        (x + 0.5, -0.5, z),
+        (x + 0.5, 0.5, z),
+        (x - 0.5, 0.5, z),
+    )
+    lines = [
+        "ply",
+        "format ascii 1.0",
+        "element vertex 4",
+        "property float x",
+        "property float y",
+        "property float z",
+        "property uchar red",
+        "property uchar green",
+        "property uchar blue",
+        "element face 2",
+        "property list uchar int vertex_indices",
+        "end_header",
+        *(f"{vx:.8g} {vy:.8g} {vz:.8g} 204 204 204" for vx, vy, vz in verts),
+        "3 0 1 2",
+        "3 0 2 3",
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_block_f_uses_the_review_camera_on_a_world_mesh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import cv2
+
+    from tools.block_f import render_view
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    can = tmp_path / "can"
+    chain = can / "chain" / "orbit1"
+    mesh = chain / "mesh" / "mesh.ply"
+    _square_ply(mesh, 1.2, 0.3)
+    (chain / "world_T_object.json").write_text(
+        json.dumps(
+            {
+                "translation": [1.2, 0.0, 0.3],
+                "rotation_wxyz": [1.0, 0.0, 0.0, 0.0],
+                "scale": 1.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    ingest = chain / "ingest"
+    ingest.mkdir(parents=True)
+    (ingest / "block_e.json").write_text(
+        json.dumps(
+            {
+                "parts": [
+                    {
+                        "id": "E1",
+                        "reason": (
+                            "mesh written from the existing splat; "
+                            "scale is still unmet until metres_per_unit is measured"
+                        ),
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    c2w = np.eye(4, dtype=np.float64)
+    c2w[:3, 3] = [1.2, 0.0, -1.0]
+    intrinsics = {"fx": 40.0, "fy": 40.0, "cx": 24.0, "cy": 24.0, "width": 48, "height": 48}
+    view = render_view(mesh, c2w, intrinsics)
+    reviews = can / "reviews"
+    reviews.mkdir(parents=True)
+    rgb = np.clip(view["rgb"] * 255.0, 0, 255).astype(np.uint8)
+    cv2.imwrite(str(reviews / "frame_00167.png"), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+    cv2.imwrite(str(reviews / "frame_00167_mask.png"), view["mask"].astype(np.uint8) * 255)
+    opengl = c2w @ np.diag([1.0, -1.0, -1.0, 1.0])
+    transforms = can / "colmap" / "orbit1" / "transforms.json"
+    transforms.parent.mkdir(parents=True)
+    transforms.write_text(
+        json.dumps(
+            {
+                "w": 48,
+                "h": 48,
+                "fl_x": 40.0,
+                "fl_y": 40.0,
+                "cx": 24.0,
+                "cy": 24.0,
+                "camera_model": "OPENCV",
+                "frames": [
+                    {"file_path": "images/frame_00167.png", "transform_matrix": opengl.tolist()},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    pose_text = (chain / "world_T_object.json").read_text(encoding="utf-8")
+    block_e_text = (ingest / "block_e.json").read_text(encoding="utf-8")
+    result = oc.run_block_f(can, "orbit1", chain)
+    f1 = next(part for part in result["record"]["parts"] if part["id"] == "F1")
+    assert result["record"]["achieved"] is False
+    assert result["record"]["learned_prior"] is False
+    assert f1["achieved"] is False
+    assert f1["numbers"]["metres_per_unit"] is None
+    assert f1["numbers"]["iou"] > 0.95
+    assert "metres_per_unit is missing" in f1["reason"]
+    assert "Triangles were drawn" in f1["reason"]
+    assert "The render is blank" not in f1["reason"]
+    saved = json.loads((chain / "align.json").read_text(encoding="utf-8"))
+    assert saved["crop_translation_applied"] is False
+    assert saved["mesh_frame"] == "world"
+    assert saved["render_blank"] is False
+    assert saved["triangles_in_front"] > 0
+    assert max(abs(float(value)) for value in saved["translation"]) < 0.06
+    assert abs(float(saved["translation"][0]) - 1.2) > 0.5
+    assert (chain / "world_T_object.json").read_text(encoding="utf-8") == pose_text
+    assert (ingest / "block_e.json").read_text(encoding="utf-8") == block_e_text
+
+
+def test_missing_dataparser_still_uses_the_training_camera(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import cv2
+
+    from tools.block_f import opencv_c2w, render_view
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    can = tmp_path / "can"
+    chain = can / "chain" / "orbit1"
+    opengl = np.array(
+        [
+            np.array(
+                [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 3.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ]
+            ),
+            np.array(
+                [
+                    [1.0, 0.0, 0.0, 1.5],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 3.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ]
+            ),
+        ]
+    )
+    # OpenGL identity looks down -Z. Flip the stored rotation into that convention.
+    flip = np.diag([1.0, -1.0, -1.0, 1.0])
+    stored = np.stack([pose @ flip for pose in opengl])
+    training = oc._training_opengl_c2w(stored[0], stored)
+    camera = opencv_c2w(training)
+    assert not np.allclose(camera, opencv_c2w(stored[0]))
+    center = camera[:3, 3]
+    right = camera[:3, 0]
+    down = camera[:3, 1]
+    forward = camera[:3, 2]
+    origin = center + forward * 1.6
+    corners = [
+        origin - 0.35 * right - 0.35 * down,
+        origin + 0.35 * right - 0.35 * down,
+        origin + 0.35 * right + 0.35 * down,
+        origin - 0.35 * right + 0.35 * down,
+    ]
+    mesh = chain / "mesh" / "mesh.ply"
+    mesh.parent.mkdir(parents=True)
+    body = [
+        "ply",
+        "format ascii 1.0",
+        "element vertex 4",
+        "property float x",
+        "property float y",
+        "property float z",
+        "property uchar red",
+        "property uchar green",
+        "property uchar blue",
+        "element face 2",
+        "property list uchar int vertex_indices",
+        "end_header",
+    ]
+    for corner in corners:
+        body.append(f"{corner[0]:.8g} {corner[1]:.8g} {corner[2]:.8g} 204 204 204")
+    body.extend(["3 0 1 2", "3 0 2 3"])
+    mesh.write_text("\n".join(body) + "\n", encoding="utf-8")
+    shift = [float(value) for value in origin]
+    (chain / "world_T_object.json").write_text(
+        json.dumps({"translation": shift, "rotation_wxyz": [1.0, 0.0, 0.0, 0.0], "scale": 1.0}),
+        encoding="utf-8",
+    )
+    ingest = chain / "ingest"
+    ingest.mkdir()
+    (ingest / "block_e.json").write_text(
+        json.dumps(
+            {
+                "parts": [
+                    {
+                        "id": "E1",
+                        "reason": "mesh written from the existing splat; scale is still unmet until metres_per_unit is measured",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    intrinsics = {"fx": 40.0, "fy": 40.0, "cx": 24.0, "cy": 24.0, "width": 48, "height": 48}
+    view = render_view(mesh, camera, intrinsics)
+    reviews = can / "reviews"
+    reviews.mkdir()
+    rgb = np.clip(view["rgb"] * 255.0, 0, 255).astype(np.uint8)
+    cv2.imwrite(str(reviews / "frame_00167.png"), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+    cv2.imwrite(str(reviews / "frame_00167_mask.png"), view["mask"].astype(np.uint8) * 255)
+    transforms = can / "colmap" / "orbit1" / "transforms.json"
+    transforms.parent.mkdir(parents=True)
+    transforms.write_text(
+        json.dumps(
+            {
+                "w": 48,
+                "h": 48,
+                "fl_x": 40.0,
+                "fl_y": 40.0,
+                "cx": 24.0,
+                "cy": 24.0,
+                "camera_model": "OPENCV",
+                "applied_transform": [[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, -1.0, 0.0, 0.0]],
+                "frames": [
+                    {"file_path": "images/frame_00167.png", "transform_matrix": stored[0].tolist()},
+                    {"file_path": "images/frame_00002.png", "transform_matrix": stored[1].tolist()},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = oc.run_block_f(can, "orbit1", chain)
+    f1 = next(part for part in result["record"]["parts"] if part["id"] == "F1")
+    saved = json.loads((chain / "align.json").read_text(encoding="utf-8"))
+    assert f1["achieved"] is False
+    assert f1["numbers"]["metres_per_unit"] is None
+    assert f1["numbers"]["iou"] > 0.95
+    assert saved["metres_per_unit"] is None
+    assert saved["render_blank"] is False
+    assert saved["crop_translation_applied"] is False
+    assert "metres_per_unit is missing" in f1["reason"]
+    assert "Triangles were drawn" in f1["reason"]
 
 
 def test_measured_d1_does_not_start_block_d(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -665,6 +954,38 @@ def _fill_physics(payload: dict):
         return "filled"
 
     return fake
+
+
+def _chain_mesh_physics(chain: Path, parts: bool = True) -> None:
+    mesh = chain / "mesh" / "mesh.ply"
+    mesh.parent.mkdir(parents=True, exist_ok=True)
+    mesh.write_text("ply\n", encoding="utf-8")
+    chain.joinpath("physics.json").write_text(
+        json.dumps(
+            {
+                "material": "aluminum",
+                "mass_kg": 0.016,
+                "static_friction": 0.3,
+                "dynamic_friction": 0.22,
+                "restitution": 0.25,
+                "learned_prior": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    ingest = chain / "ingest"
+    ingest.mkdir(parents=True, exist_ok=True)
+    (ingest / "hulls.json").write_text(
+        json.dumps({"coacd": False, "convex_hull": "not_built", "n_hulls": 0, "method": None}),
+        encoding="utf-8",
+    )
+    if parts:
+        (ingest / "parts.json").write_text(
+            json.dumps(
+                {"parts": [{"id": "body", "joint": None, "generated": False, "partfield": False}], "learned_prior": False}
+            ),
+            encoding="utf-8",
+        )
 
 
 def _can(tmp_path: Path) -> Path:

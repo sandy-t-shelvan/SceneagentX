@@ -112,7 +112,7 @@ def _run_process(
     output: Path,
     runner: Runner,
 ) -> CmdResult:
-    if shutil.which("ns-process-data") is None and runner is default_runner:
+    if runner is default_runner and shutil.which("ns-process-data") is None:
         return CmdResult(127, "", "ns-process-data is not on PATH. Run this in the nerf env on the GPU box.")
     output.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -131,7 +131,7 @@ def _run_process(
 
 
 def _run_analyzer(model: Path, runner: Runner) -> CmdResult:
-    if shutil.which("colmap") is None and runner is default_runner:
+    if runner is default_runner and shutil.which("colmap") is None:
         return CmdResult(127, "", "colmap is not on PATH. Run this in the nerf env on the GPU box.")
     return runner(["colmap", "model_analyzer", "--path", str(model)], 10 * 60)
 

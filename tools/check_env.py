@@ -89,7 +89,7 @@ def parse_nvidia_smi(text: str) -> dict:
 
 
 def probe_gpu(runner: Runner) -> dict:
-    if shutil.which("nvidia-smi") is None and runner is default_runner:
+    if runner is default_runner and shutil.which("nvidia-smi") is None:
         return {
             "gpu_count": 0,
             "gpu_names": [],
@@ -138,9 +138,10 @@ def setup_minutes_ok(minutes: float | None) -> bool | None:
 
 def probe(runner: Runner | None = None) -> dict:
     run = runner or default_runner
-    micromamba = shutil.which("micromamba")
     if runner is not None:
         micromamba = "injected"
+    else:
+        micromamba = shutil.which("micromamba")
     gpu = probe_gpu(run)
     if micromamba is None:
         envs = {name: False for name in ENVS}

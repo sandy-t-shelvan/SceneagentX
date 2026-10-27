@@ -145,4 +145,9 @@ def test_pipeline_rejects_later_block(tmp_path, monkeypatch):
     video = tmp_path / "data" / "marker" / "raw" / "orbit1.mp4"
     video.parent.mkdir(parents=True)
     video.write_bytes(b"video")
-    assert run("marker", through="B5", root=tmp_path) == 3
+    assert run(
+        "marker",
+        through="B5",
+        root=tmp_path,
+        runner=lambda cmd, timeout: CmdResult(0, "", ""),
+    ) == 3

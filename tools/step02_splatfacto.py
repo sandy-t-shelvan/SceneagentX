@@ -104,6 +104,19 @@ def splat_path(obj: str, orbit: int, root: Path | None = None) -> Path:
     return colmap_dir(obj, orbit, root) / "splat.ply"
 
 
+def passing_checkpoint_stays(obj: str, orbit: int, root: Path | None = None) -> bool:
+    """A splat that already passed stays. Another train would only move a number."""
+    ply = splat_path(obj, orbit, root)
+    if not ply.is_file():
+        return False
+    try:
+        doc = load_status(obj, root, create=False)
+    except StatusError:
+        return False
+    record = (doc.get("step02") or {}).get(f"orbit{orbit}")
+    return isinstance(record, dict) and record.get("passed") is True
+
+
 def run_orbit(
     obj: str,
     orbit: int,
@@ -113,6 +126,9 @@ def run_orbit(
     minutes: float | None = None,
     mark_block: bool = True,
 ) -> int:
+    if eval_text is None and passing_checkpoint_stays(obj, orbit, root):
+        sys.stdout.write(f"orbit{orbit} passing checkpoint kept\n")
+        return 0
     active = runner or default_runner
     owns_block = mark_block and orbit == 1
     if owns_block:
@@ -164,7 +180,7 @@ def run_orbit(
 
 
 def _train(obj: str, orbit: int, root: Path | None, runner: Runner) -> CmdResult:
-    if shutil.which("ns-train") is None and runner is default_runner:
+    if runner is default_runner and shutil.which("ns-train") is None:
         return CmdResult(127, "", "ns-train is not on PATH. Run this in the nerf env on the GPU box.")
     data = colmap_dir(obj, orbit, root)
     return runner(

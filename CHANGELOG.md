@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Added
+- tests/test_pipeline_vast.py: with no injected runner, B0 uses the Vast host lookup and does not call local nvidia-smi
+- tests/test_orbit_chain.py: mesh.ply plus physics.json writes one body and scene.usdz, and a missing parts list writes neither
 - tests/test_orbit_chain.py: a Block C object ply whose rows match the physics bake passes Block D, and M4 stays unmet
 - tests/test_block_c.py: every eligible room-covering crop returns no crop and does not save the mask
 - tests/test_block_c.py: a room-covering anchor loses to the compact high-recall crop from the orbit 2 measurement
@@ -16,6 +18,14 @@
 - tests/test_object_block_b_report.py: a physics-vector npz is not a LangSplat codebook, and the written score keeps miou null
 
 ### Changed
+- tools/block_b_job.py: the detector caption keeps the first phrase, and a same-name box that contains a smaller box is dropped
+- tools/pipeline.py: B0, COLMAP, splatfacto, and alignment run on the one Vast host, and the raw video, splat.ply, and sparse model are copied for that host
+- tools/step02_splatfacto.py: a present passing checkpoint is not retrained
+- tools/check_env.py: a remote runner does not look for nvidia-smi on the laptop PATH
+- tools/step01_colmap.py: a remote runner does not look for COLMAP on the laptop PATH
+- tests/test_step00.py: the later-block run injects a runner so it does not look up Vast
+- tests/test_vast_host.py: the missing-video run injects a runner so it does not look up Vast
+- tools/orbit_chain.py: Block F calls the one-body can asset writers when mesh.ply and physics.json exist and the asset was never written, then composes scene.usdz
 - tools/orbit_chain.py: Block D schedules a missing checkpoint, scale weight, marker-cap, and Isaac drop, and the copy count follows this run's index
 - tools/block_d.py: a D2 physics record stamps drop not scheduled for this video instead of an Isaac hang
 - tests/test_orbit_chain.py: a missing checkpoint, M4, and M4b stay not_scheduled, and reused physics.json does not claim start_d2 ran
@@ -71,6 +81,10 @@
 - tests/test_block_d.py: refresh_block_d stays not_started until physics.json has material and mass_kg
 
 ### Fixed
+- tools/block_f.py: a world-frame mesh is not shifted by the crop-center translation, and a blank render is named along with the missing scale
+- tools/orbit_chain.py: Block F draws the review frame in the splat training frame with the OpenCV camera
+- tests/test_block_f.py: a world-frame mesh keeps its crop center, an object-centered mesh still takes the translation, and a blank render is not a pass
+- tests/test_orbit_chain.py: Block F uses the review camera in the training frame and does not apply the crop translation twice
 - tools/block_d.py: a rejected D2 reply is saved as d2_response.json and still writes no mass or physics.json
 - tests/test_block_d.py: a missing mass saves that raw reply and still writes no physics.json
 - tools/block_d.py: D2 asks for an unchecked visual material and mass_kg, and alias keys count only when the values are real

@@ -3,21 +3,27 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 
+import numpy as np
 import pytest
 
 from tools.block_b_job import (
     caption_from_spec,
     codebook_collapsed,
+    detector_caption,
     grounding_prompt,
     host_launch_script,
     require_object_name,
+    union_target_mask,
     write_host_text,
 )
 from tools.can_instances import capture_for, write_instance_record
 from tools.common.paths import repo_root
 
 LAMP_ORBIT = ("orbit1", "/root/SceneagentX/outputs/lamp_orbit1/splatfacto/run/config.yml")
+CAN_ORBIT = ("orbit1", "/root/SceneagentX/outputs/can_orbit1/splatfacto/run/config.yml")
+SYNONYM_LINE = "aluminum soda can . cylindrical beverage can . drink can with a metal pull tab ."
 
 
 def test_a_new_object_gets_one_phrase_and_installs_open_clip():
@@ -71,6 +77,108 @@ def test_room_spec_detects_the_named_target_only():
     )
     assert "PROMPT='bottle.'" in bottle
     assert "--obj bottle" in bottle
+
+
+def test_synonym_line_collapses_to_one_phrase(tmp_path):
+    assert detector_caption(SYNONYM_LINE) == "aluminum soda can."
+    assert grounding_prompt("mug") == "mug."
+    spec = {
+        "prompt": "a room; I want sisters of Y",
+        "job": "room",
+        "target": "Y",
+        "seen": ["X", "Y", "Z"],
+        "deliverable": "sisters_of_target",
+    }
+    assert caption_from_spec(spec) == "Y."
+    listed = dict(spec)
+    listed["target"] = SYNONYM_LINE
+    assert caption_from_spec(listed) == "aluminum soda can."
+    script = host_launch_script("can", [CAN_ORBIT], prompt=SYNONYM_LINE)
+    assert "PROMPT='aluminum soda can.'" in script
+    assert "cylindrical" not in script
+    from_spec = host_launch_script("can", [CAN_ORBIT], spec=listed)
+    assert "PROMPT='aluminum soda can.'" in from_spec
+    stored = (repo_root() / "configs" / "can_block_b_prompt.txt").read_text(encoding="utf-8").strip()
+    assert stored == "aluminum soda can."
+
+    folder = tmp_path / "data" / "can"
+    folder.mkdir(parents=True)
+    (folder / "request.json").write_text(
+        json.dumps(
+            {
+                "prompt": SYNONYM_LINE,
+                "job": "orbit",
+                "target": "can",
+                "seen": ["can"],
+                "deliverable": "sisters_of_target",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (folder / "mask_retry.json").write_text(
+        json.dumps(
+            {
+                "detection": "pending",
+                "orbits": ["orbit1"],
+                "params": {"text_prompt": SYNONYM_LINE},
+            }
+        ),
+        encoding="utf-8",
+    )
+    ingest = folder / "ingest"
+    ingest.mkdir()
+    (ingest / "block_a.json").write_text(
+        json.dumps({"orbits": [{"orbit": "orbit1", "config": CAN_ORBIT[1]}]}),
+        encoding="utf-8",
+    )
+    from tools.pipeline import mask_retry_commands
+
+    commands = mask_retry_commands("can", tmp_path)
+    detect = commands[0]
+    assert detect[detect.index("--prompt") + 1] == "aluminum soda can."
+    assert "cylindrical" not in " ".join(detect)
+    lift = commands[1]
+    assert lift[lift.index("--prompt") + 1] == "aluminum soda can."
+
+
+def test_containing_same_name_box_is_dropped():
+    nested = np.zeros((3, 6, 6), dtype=bool)
+    nested[0, :, :] = True
+    nested[1, 2:4, 2:4] = True
+    nested[2, 0, 0] = True
+    merged, kept = union_target_mask(nested, ["can", "can", "wall"], "can")
+    assert kept == ["can"]
+    assert int(merged.sum()) == 4
+    assert bool(merged[2, 2]) is True
+    assert bool(merged[0, 0]) is False
+
+    separate = np.zeros((2, 4, 4), dtype=bool)
+    separate[0, 0, 0] = True
+    separate[1, 3, 3] = True
+    merged_sep, kept_sep = union_target_mask(separate, ["can", "can"], "can")
+    assert kept_sep == ["can", "can"]
+    assert bool(merged_sep[0, 0]) is True
+    assert bool(merged_sep[3, 3]) is True
+    assert int(merged_sep.sum()) == 2
+
+    alone = np.ones((1, 4, 4), dtype=bool)
+    merged_one, kept_one = union_target_mask(alone, ["can"], "can")
+    assert kept_one == ["can"]
+    assert bool(merged_one.all()) is True
+
+    close = np.zeros((2, 10, 10), dtype=bool)
+    close[0, :, :] = True
+    close[1, :9, :] = True
+    merged_close, kept_close = union_target_mask(close, ["can", "can"], "can")
+    assert kept_close == ["can", "can"]
+    assert int(merged_close.sum()) == 100
+
+    tighter = np.zeros((2, 10, 10), dtype=bool)
+    tighter[0, :, :] = True
+    tighter[1, :8, :] = True
+    merged_tight, kept_tight = union_target_mask(tighter, ["can", "can"], "can")
+    assert kept_tight == ["can"]
+    assert int(merged_tight.sum()) == 80
 
 
 def test_host_text_survives_a_windows_console():

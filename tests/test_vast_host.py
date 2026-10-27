@@ -38,7 +38,7 @@ def test_pipeline_does_not_start_colmap_without_orbit_video(tmp_path, monkeypatc
     monkeypatch.setattr("tools.pipeline.run_splat_orbit", splat)
     from tools.pipeline import run
 
-    code = run("scan", through="B3", root=tmp_path)
+    code = run("scan", through="B3", root=tmp_path, runner=lambda cmd, timeout: None)
     assert code == 2
     assert called == {"colmap": False, "splat": False}
     text = (tmp_path / "data" / "scan" / "video_path.json").read_text(encoding="utf-8")

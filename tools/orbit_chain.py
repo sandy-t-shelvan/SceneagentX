@@ -40,9 +40,20 @@ from tools.block_e import (
     record_joint_sweep,
     resolve_parts,
     route_deformable,
+    write_can_asset,
     write_deformable,
+    write_physics_joints_usda,
 )
-from tools.block_f import align_similarity, camera_intrinsics, inspect_scene, orient_background, write_scene_usdz
+from tools.block_f import (
+    _physics_record,
+    align_similarity,
+    camera_intrinsics,
+    compose_scene_usda,
+    inspect_scene,
+    opencv_c2w,
+    orient_background,
+    write_scene_usdz,
+)
 from tools.block_gates import GateError
 from tools.can_block_b_check import check_orbit, probe_b123
 from tools.orbit_blocks import assign_feature_indices, resolve_scene_mean
@@ -336,7 +347,7 @@ def run_block_e(can: Path, orbit: str, d_output: Path) -> dict[str, Any]:
 
 
 def run_block_f(can: Path, orbit: str, e_output: Path) -> dict[str, Any]:
-    """Run F on E's folder. Missing world_T_object, from skipping C, is not alignment."""
+    """Run F on E's folder. The review camera draws the mesh. A missing scale is not a pass."""
     can = _require_can(can)
     orbit = _orbit(orbit)
     folder = _require_chain(can, e_output)
@@ -359,6 +370,7 @@ def run_block_f(can: Path, orbit: str, e_output: Path) -> dict[str, Any]:
         intrinsics,
         metres_per_unit=None,
         dest=folder / "align.json",
+        c2w=_review_c2w(can, orbit),
     )
     if world is None and (folder / "align.json").is_file() and _load(folder / "align.json").get("achieved") is True:
         raise GateError("alignment cannot be achieved without world_T_object")
@@ -367,12 +379,51 @@ def run_block_f(can: Path, orbit: str, e_output: Path) -> dict[str, Any]:
     if background is not None:
         orient = orient_background(background, None, dest=folder / "orientation.json")
     mesh_written = mesh.is_file() and mesh.stat().st_size > 0
-    asset = _first_file(folder, ("asset.usd", "asset.usda", "asset.usdc"))
     physics = _load(folder / "physics.json")
-    usdz = None
-    if mesh_written and asset is not None and physics:
-        from tools.block_f import compose_scene_usda
+    packaged = ensure_chain_asset_and_scene(folder, physics, mesh_written, background)
+    asset = packaged["asset"]
+    usdz = packaged["usdz"]
+    report = inspect_scene(
+        scene=folder / "scene.usdz" if usdz else None,
+        cameras=None,
+        telemetry=None,
+        folder=folder,
+        write_report=True,
+    )
+    written_report = _load(folder / "inspection_report.json")
+    if written_report.get("settle_within_2s") is True or report.get("settle_within_2s") is True:
+        raise GateError("settle_within_2s cannot be true without Isaac telemetry")
+    parts = [
+        _f1_part(folder, align, gaps),
+        _f2_part(folder, orient, background is not None),
+        _f3_part(folder, mesh_written, asset is not None, bool(physics), packaged["refusal"]),
+        _f4_part(folder, written_report),
+        _m6_part(folder),
+        _m7_part(folder, written_report),
+        _m0_part(folder),
+    ]
+    record = _block_record("F", orbit, parts, state=_f_block_state(folder, parts))
+    path = _write_record(folder / "ingest" / "block_f.json", record)
+    return {"input": folder, "output": folder, "record": _load(path), "record_path": path}
 
+
+def ensure_chain_asset_and_scene(
+    folder: Path,
+    physics: dict[str, Any],
+    mesh_written: bool,
+    background: Path | None,
+) -> dict[str, Any]:
+    """Write asset.usda with the Block E writers, then scene.usdz the way Block F already composes it.
+
+    An asset already on disk is left in place. A missing parts list or a physics file
+    that is not a physics record writes nothing. Joints are not added.
+    """
+    asset = _first_file(folder, ("asset.usd", "asset.usda", "asset.usdc"))
+    refusal = None
+    if asset is None and mesh_written and (folder / "physics.json").is_file():
+        asset, refusal = _write_one_body_asset(folder, physics)
+    usdz = None
+    if refusal is None and mesh_written and asset is not None and physics and _physics_record(physics):
         compose_scene_usda(
             folder / "scene.usda",
             asset_usd=asset,
@@ -388,28 +439,60 @@ def run_block_f(can: Path, orbit: str, e_output: Path) -> dict[str, Any]:
             asset_usd=asset,
             physics=physics,
         )
-    report = inspect_scene(
-        scene=folder / "scene.usdz" if usdz else None,
-        cameras=None,
-        telemetry=None,
-        folder=folder,
-        write_report=True,
+    return {"asset": asset, "usdz": usdz, "refusal": refusal}
+
+
+def _write_one_body_asset(folder: Path, physics: dict[str, Any]) -> tuple[Path | None, str | None]:
+    """Call write_can_asset and write_physics_joints_usda. Stop when a required input is absent."""
+    if not _physics_record(physics):
+        return None, (
+            "scene.usdz was not written. physics.json has no friction, restitution, mass_kg, or material. "
+            "The asset was not written."
+        )
+    parts_path = folder / "ingest" / "parts.json"
+    if not parts_path.is_file():
+        return None, "scene.usdz was not written. ingest/parts.json is absent. The asset was not written."
+    parts_doc = _load(parts_path)
+    parts = parts_doc.get("parts")
+    if not isinstance(parts, list) or len(parts) != 1:
+        return None, (
+            "scene.usdz was not written. ingest/parts.json is not one body. The asset was not written."
+        )
+    part = parts[0]
+    if not isinstance(part, dict) or part.get("id") != "body" or part.get("joint"):
+        return None, (
+            "scene.usdz was not written. ingest/parts.json is not one body without a joint. "
+            "The asset was not written."
+        )
+    hull_path = folder / "ingest" / "hulls.json"
+    hull = _load(hull_path) if hull_path.is_file() else None
+    written = write_can_asset(parts, "mesh/mesh.ply", folder / "asset.urdf", obj="can")
+    usda_path = write_physics_joints_usda(
+        parts,
+        folder / "asset.usda",
+        "mesh/mesh.ply",
+        mesh_on_disk=True,
+        hull=hull,
+        obj="can",
     )
-    written_report = _load(folder / "inspection_report.json")
-    if written_report.get("settle_within_2s") is True or report.get("settle_within_2s") is True:
-        raise GateError("settle_within_2s cannot be true without Isaac telemetry")
-    parts = [
-        _f1_part(folder, align, gaps),
-        _f2_part(folder, orient, background is not None),
-        _f3_part(folder, mesh_written, asset is not None, bool(physics)),
-        _f4_part(folder, written_report),
-        _m6_part(folder),
-        _m7_part(folder, written_report),
-        _m0_part(folder),
-    ]
-    record = _block_record("F", orbit, parts, state=_f_block_state(folder, parts))
-    path = _write_record(folder / "ingest" / "block_f.json", record)
-    return {"input": folder, "output": folder, "record": _load(path), "record_path": path}
+    urdf = (folder / "asset.urdf").read_text(encoding="utf-8")
+    usda = usda_path.read_text(encoding="utf-8")
+    invented = (
+        written.get("n_joints") != 0
+        or "<joint" in urdf
+        or "PhysicsRevoluteJoint" in usda
+        or "PhysicsPrismaticJoint" in usda
+        or "PhysicsDriveAPI" in usda
+    )
+    if invented:
+        for path in (folder / "asset.urdf", usda_path):
+            if path.is_file():
+                path.unlink()
+        return None, (
+            "scene.usdz was not written. The asset writer added a joint the parts list does not name. "
+            "The asset was removed."
+        )
+    return usda_path, None
 
 
 def render_block_file(path: Path) -> str:
@@ -1294,6 +1377,86 @@ def _e4_part(folder: Path, route: str | None) -> dict[str, Any]:
     )
 
 
+def _review_c2w(can: Path, orbit: str) -> np.ndarray | None:
+    """OpenCV camera-to-world of this orbit's review frame, in the mesh frame.
+
+    transforms.json stores OpenGL poses. A nerfstudio export also has
+    applied_transform and leaves the splat in the training frame: up aligned
+    to +Z, cameras recentered, translations scaled inside the unit box.
+    That scale is not metres_per_unit. The Block F drawer looks along +Z.
+    A missing frame is not replaced with a guessed camera.
+    """
+    record = _load(can / "colmap" / orbit / "transforms.json")
+    frames = record.get("frames")
+    if not isinstance(frames, list):
+        return None
+    stem = _REVIEW_STEMS[orbit]
+    poses: list[np.ndarray] = []
+    review: np.ndarray | None = None
+    for frame in frames:
+        if not isinstance(frame, dict):
+            continue
+        try:
+            pose = np.asarray(frame.get("transform_matrix"), dtype=np.float64)
+        except (TypeError, ValueError):
+            continue
+        if pose.shape != (4, 4) or not np.isfinite(pose).all():
+            continue
+        poses.append(pose)
+        if Path(str(frame.get("file_path") or "")).stem == stem:
+            review = pose
+    if review is None:
+        return None
+    if record.get("applied_transform") is not None and len(poses) >= 2:
+        review = _training_opengl_c2w(review, np.stack(poses))
+    return opencv_c2w(review)
+
+
+def _training_opengl_c2w(review: np.ndarray, poses: np.ndarray) -> np.ndarray:
+    """Map one OpenGL pose into the splatfacto training frame.
+
+    The same up-alignment, pose mean, and max-abs scale nerfstudio applies
+    when dataparser_transforms.json was not written. Not a measured metre scale.
+    """
+    rotation = _rotation_between(poses[:, :3, 1].mean(axis=0), np.array([0.0, 0.0, 1.0]))
+    oriented = np.einsum("ij,njk->nik", rotation, poses[:, :3, :])
+    center = oriented[:, :3, 3].mean(axis=0)
+    spread = float(np.max(np.abs(oriented[:, :3, 3] - center)))
+    scale = 1.0 if spread < 1e-8 else 1.0 / spread
+    rotated = rotation @ np.asarray(review, dtype=np.float64)[:3, :]
+    posed = np.eye(4, dtype=np.float64)
+    posed[:3, :3] = rotated[:, :3]
+    posed[:3, 3] = scale * (rotated[:, 3] - center)
+    return posed
+
+
+def _rotation_between(source: np.ndarray, target: np.ndarray) -> np.ndarray:
+    start = np.asarray(source, dtype=np.float64)
+    goal = np.asarray(target, dtype=np.float64)
+    start_norm = float(np.linalg.norm(start))
+    goal_norm = float(np.linalg.norm(goal))
+    if start_norm < 1e-8 or goal_norm < 1e-8:
+        return np.eye(3, dtype=np.float64)
+    start = start / start_norm
+    goal = goal / goal_norm
+    cross = np.cross(start, goal)
+    cosine = float(np.dot(start, goal))
+    sine = float(np.linalg.norm(cross))
+    if sine < 1e-8:
+        if cosine > 0.0:
+            return np.eye(3, dtype=np.float64)
+        return np.diag([1.0, -1.0, -1.0]).astype(np.float64)
+    skew = np.array(
+        [
+            [0.0, -cross[2], cross[1]],
+            [cross[2], 0.0, -cross[0]],
+            [-cross[1], cross[0], 0.0],
+        ],
+        dtype=np.float64,
+    )
+    return np.eye(3, dtype=np.float64) + skew + skew @ skew * ((1.0 - cosine) / (sine * sine))
+
+
 def _orbit_intrinsics(can: Path, orbit: str) -> dict[str, Any] | None:
     """Read this orbit's camera. A missing transforms file is not a guessed focal length."""
     candidates = (
@@ -1400,7 +1563,13 @@ def _f2_part(folder: Path, orient: dict[str, Any] | None, has_background: bool) 
     )
 
 
-def _f3_part(folder: Path, mesh_written: bool, has_asset: bool, has_physics: bool) -> dict[str, Any]:
+def _f3_part(
+    folder: Path,
+    mesh_written: bool,
+    has_asset: bool,
+    has_physics: bool,
+    refusal: str | None = None,
+) -> dict[str, Any]:
     usdz = folder / "scene.usdz"
     text = (folder / "scene.usda").read_text(encoding="utf-8") if (folder / "scene.usda").is_file() else ""
     robot = "placed" if 'sceneagent:robot = "placed"' in text else "not_placed"
@@ -1411,6 +1580,7 @@ def _f3_part(folder: Path, mesh_written: bool, has_asset: bool, has_physics: boo
             if not present
         ]
         detail = f" Missing {', '.join(missing)}." if missing else ""
+        reason = refusal or f"scene.usdz was not written.{detail} No Franka asset was invented."
         return _step(
             "F3",
             "unstarted",
@@ -1423,7 +1593,7 @@ def _f3_part(folder: Path, mesh_written: bool, has_asset: bool, has_physics: boo
                 "robot": "not_placed",
                 "franka": False,
             },
-            f"scene.usdz was not written.{detail} No Franka asset was invented.",
+            reason,
         )
     return _step(
         "F3",

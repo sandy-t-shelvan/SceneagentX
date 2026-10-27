@@ -14,6 +14,7 @@ import numpy as np
 
 REFUSED = {"", ".", ".."}
 FRAME_COVER = 0.90
+NESTED_BOX_AREA = 0.9
 OPEN_CLIP_MISSING = (
     "open_clip is not installed in this interpreter. "
     "Block B B2 runs in the sa env; install open_clip_torch there before collecting crops."
@@ -44,14 +45,30 @@ def grounding_prompt(object_name: str) -> str:
     return name + "."
 
 
+def detector_caption(text: str) -> str:
+    """First non-empty period-separated clause, with one trailing period.
+
+    GroundingDINO treats each period as another phrase. A synonym list
+    therefore becomes one phrase: the first clause only.
+    """
+    for part in str(text).split("."):
+        clause = part.strip()
+        if clause:
+            return clause + "."
+    return ""
+
+
 def caption_from_spec(spec: dict) -> str:
-    """Detector caption is the spec target. Other seen names are not added."""
+    """Detector caption is the spec target, as one phrase. Other seen names are not added."""
     if not isinstance(spec, dict):
         raise ValueError("task spec must be an object")
     target = spec.get("target")
     if not isinstance(target, str) or not target.strip():
         raise ValueError("task spec has no target")
-    return grounding_prompt(target.strip())
+    caption = detector_caption(grounding_prompt(target.strip()))
+    if not caption:
+        raise ValueError("task spec has no target")
+    return caption
 
 
 def target_label_indexes(names: list[str], target: str) -> list[int]:
@@ -62,8 +79,53 @@ def target_label_indexes(names: list[str], target: str) -> list[int]:
     return [index for index, name in enumerate(names) if normalize_label(name) == wanted]
 
 
+def _mask_box(mask: np.ndarray) -> tuple[int, int, int, int] | None:
+    """Axis-aligned box around a mask, as exclusive xyxy. Empty masks have none."""
+    rows, cols = np.nonzero(np.asarray(mask, dtype=bool))
+    if rows.size == 0:
+        return None
+    return int(cols.min()), int(rows.min()), int(cols.max()) + 1, int(rows.max()) + 1
+
+
+def _box_area(box: tuple[int, int, int, int]) -> int:
+    return (box[2] - box[0]) * (box[3] - box[1])
+
+
+def _box_contains(outer: tuple[int, int, int, int], inner: tuple[int, int, int, int]) -> bool:
+    return outer[0] <= inner[0] and outer[1] <= inner[1] and outer[2] >= inner[2] and outer[3] >= inner[3]
+
+
+def _kept_box_indexes(masks: np.ndarray) -> list[int]:
+    """Drop a box that contains a much smaller box. One box, and a lone large box, stay."""
+    count = int(masks.shape[0])
+    boxes = [_mask_box(masks[index]) for index in range(count)]
+    areas = [0 if box is None else _box_area(box) for box in boxes]
+    drop: set[int] = set()
+    for outer in range(count):
+        outer_box = boxes[outer]
+        if outer_box is None:
+            continue
+        for inner in range(count):
+            if inner == outer:
+                continue
+            inner_box = boxes[inner]
+            if inner_box is None or areas[inner] <= 0 or areas[inner] >= areas[outer]:
+                continue
+            if areas[inner] >= NESTED_BOX_AREA * areas[outer]:
+                continue
+            if _box_contains(outer_box, inner_box):
+                drop.add(outer)
+                break
+    return [index for index in range(count) if index not in drop]
+
+
 def union_target_mask(masks: np.ndarray, names: list[str], target: str) -> tuple[np.ndarray, list[str]]:
-    """OR boxes for the target only. An empty target keeps every box."""
+    """OR boxes for the target only. An empty target keeps every box.
+
+    After those target boxes are selected, a box that contains a smaller box
+    of that same name is dropped when the smaller area is under 0.9 of the
+    larger one. Other names are not selected. One remaining box is kept.
+    """
     array = np.asarray(masks)
     if array.ndim == 2:
         array = array[None, ...]
@@ -80,7 +142,11 @@ def union_target_mask(masks: np.ndarray, names: list[str], target: str) -> tuple
     if not indexes:
         return np.zeros(array.shape[1:], dtype=bool), []
     chosen = array[indexes].astype(bool)
-    return np.any(chosen, axis=0), [labels[index] for index in indexes]
+    keep = _kept_box_indexes(chosen)
+    if not keep:
+        return np.zeros(array.shape[1:], dtype=bool), []
+    kept = chosen[keep]
+    return np.any(kept, axis=0), [labels[indexes[index]] for index in keep]
 
 
 def mask_covers_frame(foreground_pixels: int, frame_pixels: int, limit: float = FRAME_COVER) -> bool:
@@ -155,20 +221,20 @@ def host_launch_script(
 ) -> str:
     """Bash that backs up, then runs B1–B4. B2 failure returns before the feature field.
 
-    A task spec supplies the detector caption. The folder name is not used
-    as that caption when the spec names a target.
+    A task spec or an explicit prompt supplies one detector phrase. The folder
+    name is not used as that caption when the spec names a target.
     """
     name = require_object_name(object_name)
     if not orbits:
         raise ValueError("Block B needs one frozen splat config per orbit")
     target = None
     if spec is not None:
-        caption = caption_from_spec(spec)
+        caption = detector_caption(caption_from_spec(spec))
         target = str(spec["target"]).strip()
     elif prompt is None:
         caption = grounding_prompt(name)
     else:
-        caption = str(prompt)
+        caption = detector_caption(str(prompt))
     if not caption.strip() or "\n" in caption or "\r" in caption:
         raise ValueError("prompt must be one non-empty line")
     if box_threshold is not None:

@@ -99,6 +99,98 @@ def test_matching_alignment_stays_unachieved_without_metres(tmp_path: Path):
     assert saved["converged"] is True
 
 
+def _square_at(x: float, y: float, z: float) -> dict[str, np.ndarray]:
+    vertices = np.array(
+        [
+            [x - 0.5, y - 0.5, z],
+            [x + 0.5, y - 0.5, z],
+            [x + 0.5, y + 0.5, z],
+            [x - 0.5, y + 0.5, z],
+        ],
+        dtype=np.float64,
+    )
+    triangles = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int64)
+    colors = np.full((4, 3), 0.8, dtype=np.float64)
+    return {"vertices": vertices, "triangles": triangles, "colors": colors}
+
+
+def _crop_pose(translation: list[float]) -> dict[str, object]:
+    return {
+        "translation": translation,
+        "rotation_wxyz": [1.0, 0.0, 0.0, 0.0],
+        "scale": 1.0,
+    }
+
+
+def test_world_frame_mesh_is_not_shifted_by_the_crop_center():
+    mesh = _square_at(1.2, 0.0, 0.3)
+    c2w = np.eye(4, dtype=np.float64)
+    c2w[:3, 3] = [1.2, 0.0, -1.0]
+    view = render_view(mesh, c2w, _intrinsics())
+    record = align_similarity(
+        mesh,
+        view["rgb"],
+        view["mask"],
+        _crop_pose([1.2, 0.0, 0.3]),
+        _intrinsics(),
+        metres_per_unit=None,
+        c2w=c2w,
+        max_evals=1,
+    )
+    assert record["iou"] > 0.95
+    assert record["achieved"] is False
+    assert record["metres_per_unit"] is None
+    assert record["crop_translation_applied"] is False
+    assert record["mesh_frame"] == "world"
+    assert record["render_blank"] is False
+    assert record["triangles_in_front"] > 0
+    assert abs(record["translation"][0]) < 1e-6
+    assert abs(record["translation"][2] - 0.3) > 0.2
+    assert "metres_per_unit is missing" in record["achieved_reason"]
+    assert "Triangles were drawn" in record["achieved_reason"]
+
+
+def test_object_centered_mesh_still_receives_the_translation():
+    mesh = _square_at(0.0, 0.0, 0.0)
+    placed = _square_at(0.0, 0.0, 2.0)
+    view = render_view(placed, np.eye(4), _intrinsics())
+    record = align_similarity(
+        mesh,
+        view["rgb"],
+        view["mask"],
+        _crop_pose([0.0, 0.0, 2.0]),
+        _intrinsics(),
+        metres_per_unit=None,
+        max_evals=1,
+    )
+    assert record["iou"] > 0.95
+    assert record["achieved"] is False
+    assert record["metres_per_unit"] is None
+    assert record["crop_translation_applied"] is True
+    assert record["mesh_frame"] == "posed"
+    assert abs(record["translation"][2] - 2.0) < 1e-6
+    assert "metres_per_unit is missing" in record["achieved_reason"]
+    assert "Triangles were drawn" in record["achieved_reason"]
+
+
+def test_blank_render_is_named_with_the_missing_scale():
+    mesh = _square_at(0.0, 0.0, -2.0)
+    image = np.zeros((48, 48, 3), dtype=np.float64)
+    image[10:30, 10:30] = 0.75
+    mask = np.zeros((48, 48), dtype=bool)
+    mask[10:30, 10:30] = True
+    record = align_similarity(
+        mesh, image, mask, np.eye(4), _intrinsics(), metres_per_unit=None, max_evals=1
+    )
+    assert record["achieved"] is False
+    assert record["converged"] is False
+    assert record["metres_per_unit"] is None
+    assert record["iou"] == 0.0
+    assert record["render_blank"] is True
+    assert record["triangles_in_front"] == 0
+    assert record["achieved_reason"] == "metres_per_unit is missing. The render is blank."
+
+
 def test_shifted_fixture_does_not_converge():
     mesh, capture, mask, world_T, intrinsics = _matching_view()
     shifted_capture = np.roll(capture, 20, axis=1)

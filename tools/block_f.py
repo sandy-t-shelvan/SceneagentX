@@ -190,6 +190,11 @@ def align_similarity(
     pose = np.eye(4, dtype=np.float64) if c2w is None else np.asarray(c2w, dtype=np.float64)
     if isinstance(intrinsics, dict) and intrinsics.get("c2w") is not None and c2w is None:
         pose = np.asarray(intrinsics["c2w"], dtype=np.float64)
+    crop_applied = True
+    if _leave_world_mesh_unshifted(mesh, geometry["vertices"], params):
+        params = np.array(params, dtype=np.float64, copy=True)
+        params[4:7] = 0.0
+        crop_applied = False
     best, history, n_evals, backend = _search_similarity(
         geometry, image, silhouette, params, cameras, pose, max_evals=max_evals
     )
@@ -219,14 +224,21 @@ def align_similarity(
             "init_source": "world_T",
             "n_evals": n_evals,
             "photometric_history": history,
+            "crop_translation_applied": crop_applied,
+            "mesh_frame": "posed" if crop_applied else "world",
+            "triangles_in_front": int(best["triangles_in_front"]),
+            "render_blank": bool(best["render_blank"]),
         }
     )
+    drawn = _draw_sentence(bool(best.get("render_blank", True)))
     if metres is None:
         record["achieved"] = False
-        record["achieved_reason"] = "metres_per_unit is missing"
+        record["achieved_reason"] = f"metres_per_unit is missing. {drawn}"
     elif not converged:
         record["achieved"] = False
-        record["achieved_reason"] = "IoU is not above 0.95 or the photometric residual has not plateaued"
+        record["achieved_reason"] = (
+            "IoU is not above 0.95 or the photometric residual has not plateaued. " + drawn
+        )
     else:
         record["achieved_reason"] = ""
     if backend != "open3d":
@@ -661,6 +673,8 @@ def _search_similarity(
         moved["vertices"] = _transform_vertices(geometry["vertices"], candidate)
         view = render_view(moved, c2w, intrinsics)
         scored = score_residuals(view["rgb"], view["mask"], image, silhouette)
+        scored["triangles_in_front"] = _triangles_in_front(moved["vertices"], moved["triangles"], c2w)
+        scored["render_blank"] = not bool(np.any(view["mask"]))
         scored["scale"] = float(candidate[0])
         scored["rotation_rotvec"] = [float(value) for value in candidate[1:4]]
         scored["translation"] = [float(value) for value in candidate[4:7]]
@@ -1634,6 +1648,79 @@ def _mesh_from_path(path: Path) -> dict[str, Any] | None:
     }
 
 
+def _draw_sentence(blank: bool) -> str:
+    if blank:
+        return "The render is blank."
+    return "Triangles were drawn."
+
+
+def _leave_world_mesh_unshifted(mesh: Any, vertices: np.ndarray, params: np.ndarray) -> bool:
+    """True when this mesh is already in the world frame and world_T is only the crop center.
+
+    crop_splat recenters object.ply and stores that bbox center with identity
+    rotation and scale 1. extract_object_mesh on the COLMAP splat does not
+    subtract it. An object-centered mesh still needs the translation: its bbox
+    center is nearer the origin than that shift. A Block E record that names a
+    different source is not this case.
+    """
+    if not _crop_center_pose(params):
+        return False
+    if _block_e_denies_world_splat(mesh):
+        return False
+    return _world_mesh_holds_crop_center(vertices, params[4:7])
+
+
+def _crop_center_pose(params: np.ndarray) -> bool:
+    if abs(float(params[0]) - 1.0) > 1e-3:
+        return False
+    return float(np.linalg.norm(np.asarray(params[1:4], dtype=np.float64))) <= 1e-4
+
+
+def _world_mesh_holds_crop_center(vertices: np.ndarray, translation: np.ndarray) -> bool:
+    points = np.asarray(vertices, dtype=np.float64)[:, :3]
+    center = (points.min(axis=0) + points.max(axis=0)) * 0.5
+    shift = np.asarray(translation, dtype=np.float64).reshape(3)
+    if shift.shape != (3,) or not np.isfinite(center).all() or not np.isfinite(shift).all():
+        return False
+    return float(np.linalg.norm(center - shift)) < float(np.linalg.norm(center))
+
+
+def _block_e_denies_world_splat(mesh: Any) -> bool:
+    if not isinstance(mesh, (str, Path)):
+        return False
+    folder = Path(mesh).resolve().parent
+    if folder.name == "mesh":
+        folder = folder.parent
+    record = _read(folder / "ingest" / "block_e.json")
+    if not record:
+        return False
+    for part in record.get("parts") or []:
+        if not isinstance(part, dict) or part.get("id") != "E1":
+            continue
+        reason = str(part.get("reason") or "")
+        if reason and "mesh written from the existing splat" not in reason:
+            return True
+    return False
+
+
+def _triangles_in_front(vertices: np.ndarray, triangles: np.ndarray, c2w: np.ndarray) -> int:
+    pose = np.asarray(c2w, dtype=np.float64)
+    if pose.shape != (4, 4) or not np.isfinite(pose).all():
+        return 0
+    try:
+        world_to_camera = np.linalg.inv(pose)
+    except np.linalg.LinAlgError:
+        return 0
+    camera = (np.asarray(vertices, dtype=np.float64) @ world_to_camera[:3, :3].T) + world_to_camera[:3, 3]
+    faces = np.asarray(triangles, dtype=np.int64)
+    if faces.ndim != 2 or faces.shape[0] == 0 or faces.shape[1] < 3:
+        return 0
+    depth = camera[:, 2]
+    if np.any(faces < 0) or np.any(faces >= len(depth)):
+        return 0
+    return int(np.all(depth[faces[:, :3]] > 1e-4, axis=1).sum())
+
+
 def _pose_params(world_T: Any) -> np.ndarray | None:
     if world_T is None:
         return None
@@ -1744,6 +1831,18 @@ def _sobel(rgb: np.ndarray) -> np.ndarray:
     if peak > 0.0:
         magnitude = magnitude / peak
     return magnitude
+
+
+def opencv_c2w(c2w: np.ndarray) -> np.ndarray:
+    """Map an OpenGL camera-to-world matrix onto the OpenCV drawer.
+
+    Nerfstudio stores a pose that looks down -Z. render_view looks down +Z.
+    """
+    matrix = np.asarray(c2w, dtype=np.float64)
+    if matrix.shape != (4, 4) or not np.isfinite(matrix).all():
+        raise GateError("camera pose must be a 4 by 4 matrix")
+    flip = np.diag([1.0, -1.0, -1.0, 1.0]).astype(np.float64)
+    return matrix @ flip
 
 
 def camera_intrinsics(record: dict[str, Any] | None) -> dict[str, Any] | None:
