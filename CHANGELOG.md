@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Added
+- tests/test_block_h_prompt.py: --prompt stores the user's text before Block H skills, and --fresh rebuilds even when a checkpoint is present
+- tools/gate_bypass.py: SCENEAGENT_BYPASS_GATES, default off, records a bypassed check as skipped or unmet and leaves achieved, m1_met, m2_met, and milestone false
+- tests/test_gate_bypass.py: the Block H walk stops on the first failed skill by default, and with the switch on it continues without marking achieved
 - tests/test_pipeline_vast.py: with no injected runner, B0 uses the Vast host lookup and does not call local nvidia-smi
 - tests/test_orbit_chain.py: mesh.ply plus physics.json writes one body and scene.usdz, and a missing parts list writes neither
 - tests/test_orbit_chain.py: a Block C object ply whose rows match the physics bake passes Block D, and M4 stays unmet
@@ -18,6 +21,18 @@
 - tests/test_object_block_b_report.py: a physics-vector npz is not a LangSplat codebook, and the written score keeps miou null
 
 ### Changed
+- tools/agent_loop.py: --orchestrate --prompt stores the user text before any skill, and --fresh rebuilds COLMAP and splatfacto without deleting outputs or raw video
+- tools/agent_loop.py: --orchestrate walks Block H from SCENEAGENT-RUN-PIPELINE, and --bypass-gates lets the next skill run after an unmet check
+- tools/pipeline.py: a failed block or an unimplemented block stops the run unless SCENEAGENT_BYPASS_GATES is on
+- tools/iterate.py: measurement, vision, and second-fault stops stay failures, and the block walk continues only when the switch is on
+- tools/step01_colmap.py: a failed registration or reprojection check stays unmet when the switch is on
+- tools/align.py: missing metres_per_unit keeps alignment unachieved when the switch is on
+- tools/block_gates.py: the second parts-review fault still returns failure, and the switch only records it
+- tools/block_b_job.py: with the switch on, a backup or codebook failure is recorded and the Block B job is not exited there
+- tools/block_c.py: a skipped or failed infill stays an unmet M3 check when the switch is on
+- tools/block_d.py: a missing learned-prior checkpoint is still a refusal, and the switch only records that it is unmet
+- tools/common/vlm.py: a pass below confidence 0.6 stays a fail
+- tools/orbit_chain.py: the learned-prior checkpoint refusal stays unstarted, and the switch records it as unmet
 - tools/block_b_job.py: the detector caption keeps the first phrase, and a same-name box that contains a smaller box is dropped
 - tools/pipeline.py: B0, COLMAP, splatfacto, and alignment run on the one Vast host, and the raw video, splat.ply, and sparse model are copied for that host
 - tools/step02_splatfacto.py: a present passing checkpoint is not retrained

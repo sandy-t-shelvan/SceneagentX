@@ -20,6 +20,7 @@ if str(_ROOT) not in sys.path:
 import base64
 import json
 import os
+import subprocess
 import urllib.error
 import urllib.request
 from typing import Any, Callable
@@ -28,7 +29,7 @@ from tools.common.paths import object_dir, renders_dir
 from tools.harvard_agents import SKILLS, write_agents
 from tools.ingest import classify_input, colmap_refused
 from tools.review_step import REQUIRED, ReviewError, review_block
-from tools.video_input import find_video, record_absent
+from tools.video_input import VIDEO_SUFFIXES, find_video, record_absent
 
 MAX_RETRIES = 3
 MEASURED_BLOCKS = frozenset({"B0", "B1", "B2", "B3", "B4", "B8"})
@@ -486,21 +487,629 @@ def _write_once(
     (folder / "once.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+CAN_CAPTION = "aluminum soda can."
+SkillFn = Callable[[], int]
+
+
+def run_block_h(
+    obj: str,
+    root: Path | None = None,
+    skills: list[tuple[str, SkillFn]] | None = None,
+    *,
+    prompt: str | None = None,
+    source: Path | None = None,
+    fresh: bool = False,
+    videos: list[Path] | None = None,
+) -> int:
+    """Walk the Block H skills, starting with SCENEAGENT-RUN-PIPELINE.
+
+    A prompt is stored before the first skill. The detector caption is one
+    phrase from that prompt. With the bypass switch off, the first failed
+    skill stops the walk. With it on, the unmet check is recorded and the
+    next skill runs. This does not mark a milestone achieved.
+    """
+    from tools.gate_bypass import continue_past
+
+    caption = CAN_CAPTION
+    video_names = [str(path) for path in videos] if videos else None
+    if video_names:
+        sys.stdout.write("videos " + " ".join(video_names) + "\n")
+    if prompt is not None:
+        from tools.block_b_job import detector_caption
+        from tools.task_spec import accept_pipeline_prompt
+
+        caption = detector_caption(prompt)
+        if not caption:
+            sys.stderr.write("prompt must contain one phrase\n")
+            _write_block_h(
+                obj,
+                root,
+                [],
+                stopped="pipeline_prompt",
+                caption=CAN_CAPTION,
+                prompt=prompt,
+                videos=video_names,
+            )
+            return 2
+        code = accept_pipeline_prompt(obj, prompt, root, source=source)
+        if code != 0 and not continue_past(
+            obj,
+            root,
+            "pipeline_prompt",
+            "the pipeline prompt was not stored",
+            check="unmet",
+        ):
+            _write_block_h(
+                obj,
+                root,
+                [],
+                stopped="pipeline_prompt",
+                caption=caption,
+                prompt=prompt,
+                videos=video_names,
+            )
+            return code
+        sys.stdout.write(f"detector caption {caption}\n")
+    if fresh:
+        _clear_local_stale(obj, root)
+    steps = list(skills) if skills is not None else _default_skills(obj, root, caption, fresh)
+    walked: list[dict[str, Any]] = []
+    for skill_id, fn in steps:
+        accept_planner_skill(skill_id)
+        detail = ""
+        try:
+            code = int(fn())
+        except SkillFault as exc:
+            code = 2
+            detail = str(exc)
+        except Exception as exc:
+            from tools.block_gates import GateError
+
+            if not isinstance(exc, GateError):
+                raise
+            code = 2
+            detail = str(exc)
+        walked.append({"skill": skill_id, "code": code, "detail": detail, "achieved": False, "m1_met": False, "m2_met": False})
+        sys.stdout.write(f"{skill_id} exit {code}\n")
+        if code != 0:
+            if continue_past(obj, root, skill_id, detail or f"{skill_id} exited {code}", check="unmet"):
+                continue
+            ask_question(
+                obj,
+                _SKILL_BLOCK.get(skill_id, "B16"),
+                f"{skill_id} stopped. What should change on the next try?",
+                root,
+            )
+            _write_block_h(
+                obj,
+                root,
+                walked,
+                stopped=skill_id,
+                caption=caption,
+                prompt=prompt,
+                videos=video_names,
+            )
+            return code if code != 0 else 2
+    _write_block_h(obj, root, walked, stopped=None, caption=caption, prompt=prompt, videos=video_names)
+    return 0
+
+
+def _default_skills(
+    obj: str,
+    root: Path | None,
+    caption: str = CAN_CAPTION,
+    fresh: bool = False,
+) -> list[tuple[str, SkillFn]]:
+    return [
+        ("SCENEAGENT-RUN-PIPELINE", lambda: _skill_run_pipeline(obj, root, caption)),
+        ("SCENEAGENT-INGEST-DATA", lambda: _skill_ingest(obj, root, rebuild=fresh)),
+        ("SCENEAGENT-RUN-STEP", lambda: _skill_run_step(obj, root, caption)),
+        ("SCENEAGENT-ALIGN-SCENE", lambda: _skill_align(obj, root)),
+        ("SCENEAGENT-ORIENT-BACKGROUND", lambda: _skill_skip("orient")),
+        ("SCENEAGENT-PACKAGE-DATA-PROCESSED", lambda: _skill_package(obj, root)),
+        ("SCENEAGENT-INSPECT-ISAAC", lambda: _skill_skip("inspect; sim.reset was not called")),
+        ("SCENEAGENT-OBJECT-SISTERS", lambda: _skill_skip("object sisters")),
+        ("SCENEAGENT-SCENE-SISTERS", lambda: _skill_skip("scene sisters")),
+    ]
+
+
+def _skill_skip(reason: str) -> int:
+    sys.stdout.write(f"skipped {reason}; a skip is not a pass\n")
+    return 2
+
+
+def _skill_run_pipeline(obj: str, root: Path | None, caption: str = CAN_CAPTION) -> int:
+    route = choose_path(obj, root)
+    sys.stdout.write(f"path {route}\n")
+    sys.stdout.write(f"detector caption {caption}\n")
+    if route == "stop":
+        return 2
+    from tools.pipeline import apply_mask_retry
+    from tools.task_spec import gate_detected_target
+
+    code = gate_detected_target(obj, root)
+    if code != 0:
+        return code
+    return apply_mask_retry(obj, root)
+
+
+def _clear_local_stale(obj: str, root: Path | None) -> None:
+    """Drop old masks and scores so the first skill does not read them.
+
+    Raw video, request.json, COLMAP, and outputs/ stay. COLMAP is removed
+    later, only after a Vast host is running and a new train can start.
+    """
+    import shutil
+
+    from tools.common.paths import object_dir
+
+    folder = object_dir(obj, root)
+    for name in ("masks", "crops", "chain", "ingest", "reviews", "semantics", "iou", "objects"):
+        path = folder / name
+        if path.is_dir():
+            shutil.rmtree(path)
+        elif path.is_file():
+            path.unlink()
+    retry = folder / "mask_retry.json"
+    if retry.is_file():
+        retry.unlink()
+
+
+def _clear_local_colmap(obj: str, root: Path | None) -> None:
+    """Remove local COLMAP work so the next process starts empty. outputs/ stays."""
+    import shutil
+
+    from tools.common.paths import object_dir
+
+    folder = object_dir(obj, root) / "colmap"
+    if folder.exists():
+        shutil.rmtree(folder)
+
+
+def _clear_remote_generated(host, obj: str) -> int:
+    """Remove generated object files on the host. Raw video and outputs/ stay."""
+    from tools.block_b_job import require_object_name
+
+    try:
+        name = require_object_name(obj)
+    except ValueError as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 2
+    if not name or any(not (char.isalnum() or char in "-_") for char in name):
+        sys.stderr.write(f"refusing object name {name}\n")
+        return 2
+    script = "\n".join(
+        [
+            "set -eu",
+            f"base=/root/SceneagentX/data/{name}",
+            'rm -rf "$base/colmap" "$base/masks" "$base/crops" "$base/chain" "$base/ingest"',
+            'rm -f "$base/status.json"',
+            "",
+        ]
+    )
+    code, out, err = _ssh(host, script, timeout=120)
+    if out:
+        sys.stdout.write(out)
+    if code != 0:
+        sys.stderr.write(err or "remote generated data was not cleared\n")
+    return code
+
+
+def _skill_ingest(obj: str, root: Path | None, *, rebuild: bool = False) -> int:
+    """Start COLMAP or splatfacto only when that orbit's artifact is missing.
+
+    A finished checkpoint under outputs/ or a splat.ply already on disk stays.
+    rebuild runs both again. The outputs/ tree is not deleted; a new train
+    adds its own timestamp beside the old one.
+    """
+    from tools.common.paths import resolve_root
+    from tools.gate_bypass import continue_past
+    from tools.pipeline import VastRunner, pull_reconstruction, push_missing_raw_videos, running_vast_host
+    from tools.step01_colmap import run_orbit as run_colmap
+    from tools.step01_colmap import sparse_dir
+    from tools.step02_splatfacto import run_orbit as run_splat
+
+    orbits = (1, 2, 3)
+    if rebuild:
+        missing = list(orbits)
+    else:
+        missing = [orbit for orbit in orbits if _colmap_missing(obj, root, orbit) or _splat_missing(obj, root, orbit)]
+        if not missing:
+            sys.stdout.write("ingest kept existing COLMAP and splat checkpoints\n")
+            return 0
+    host = running_vast_host()
+    if host is None:
+        sys.stderr.write("no running Vast instance\n")
+        return 2
+    synced = _sync_host_code(host)
+    if synced != 0:
+        return synced
+    if rebuild:
+        sys.stdout.write(
+            "rebuilding COLMAP and splatfacto; existing outputs stay until the new train adds a timestamp\n"
+        )
+        cleared = _clear_remote_generated(host, obj)
+        if cleared != 0:
+            return cleared
+        _clear_local_colmap(obj, root)
+    runner = VastRunner(host, resolve_root(root))
+    pushed = push_missing_raw_videos(host, obj, root)
+    if pushed != 0:
+        return pushed
+    failed = False
+    for orbit in missing:
+        sparse = sparse_dir(obj, orbit, root)
+        sparse_ready = sparse.is_dir() and any(sparse.iterdir())
+        if rebuild or (_colmap_missing(obj, root, orbit) and not sparse_ready):
+            code = run_colmap(obj, orbit, root, runner, mark_block=orbit == 1)
+            if code != 0:
+                if continue_past(obj, root, "colmap_registration", f"orbit{orbit} exited {code}", check="unmet"):
+                    failed = True
+                    continue
+                return code
+        if rebuild or _splat_missing(obj, root, orbit):
+            code = run_splat(obj, orbit, root, runner, mark_block=orbit == 1)
+            if code == 0 and host is not None:
+                copied = pull_reconstruction(host, obj, root, orbit)
+                if copied != 0:
+                    code = copied
+            if code != 0:
+                if continue_past(obj, root, "splatfacto", f"orbit{orbit} exited {code}", check="unmet"):
+                    failed = True
+                    continue
+                return code
+    return 1 if failed else 0
+
+
+def _colmap_missing(obj: str, root: Path | None, orbit: int) -> bool:
+    """True only when this orbit has no sparse model and no finished splat to keep."""
+    from tools.common.paths import status_path
+    from tools.common.status import StatusError, load_status
+    from tools.step01_colmap import sparse_dir
+    from tools.step02_splatfacto import splat_path
+
+    if splat_path(obj, orbit, root).is_file():
+        return False
+    if status_path(obj, root).is_file():
+        try:
+            doc = load_status(obj, root, create=False)
+        except StatusError:
+            doc = {}
+        stored = ((doc.get("step01") or {}).get(f"orbit{orbit}") or {}) if isinstance(doc, dict) else {}
+        if stored.get("passed") is True:
+            return False
+    sparse = sparse_dir(obj, orbit, root)
+    return not (sparse.is_dir() and any(sparse.iterdir()))
+
+
+def _splat_missing(obj: str, root: Path | None, orbit: int) -> bool:
+    from tools.common.paths import resolve_root
+    from tools.step02_splatfacto import passing_checkpoint_stays, splat_path
+
+    if passing_checkpoint_stays(obj, orbit, root):
+        return False
+    if splat_path(obj, orbit, root).is_file():
+        return False
+    base = resolve_root(root) / "outputs" / f"{obj}_orbit{orbit}" / "splatfacto"
+    if base.is_dir() and any(base.glob("*/config.yml")):
+        return False
+    return True
+
+
+def _skill_run_step(obj: str, root: Path | None, caption: str = CAN_CAPTION) -> int:
+    """Launch Block B on the live Vast host with one detector phrase."""
+    from tools.pipeline import running_vast_host
+
+    host = running_vast_host()
+    if host is None:
+        sys.stderr.write("no running Vast instance\n")
+        return 2
+    pairs = _splat_configs(obj, root, host)
+    if not pairs:
+        sys.stderr.write("no splat config; Block B was not started and the splat was not retrained\n")
+        return 2
+    from tools.block_b_job import host_launch_script
+
+    script = host_launch_script(obj, pairs, prompt=caption, log_stem=f"{obj}_block_h")
+    copied = _sync_host_code(host)
+    if copied != 0:
+        return copied
+    code, out, err = _ssh(host, script, timeout=90)
+    sys.stdout.write(out)
+    if err:
+        sys.stderr.write(err)
+    _remember_gpu(obj, host, out, err, code)
+    if code != 0 and "ALREADY_RUNNING" not in out:
+        return code if code != 0 else 2
+    return 0
+
+
+def _splat_configs(obj: str, root: Path | None, host) -> list[tuple[str, str]]:
+    code, out, err = _ssh(
+        host,
+        "\n".join(
+            [
+                "set -eu",
+                "python3 - << 'PY'",
+                "from pathlib import Path",
+                "root = Path('/root/SceneagentX/outputs')",
+                f"name = {obj!r}",
+                "for orbit in ('orbit1', 'orbit2', 'orbit3'):",
+                "    base = root / f'{name}_{orbit}' / 'splatfacto'",
+                "    found = sorted(base.glob('*/config.yml')) if base.is_dir() else []",
+                "    print(orbit + '\\t' + (str(found[-1]) if found else 'MISSING'))",
+                "PY",
+                "",
+            ]
+        ),
+        timeout=60,
+    )
+    pairs: list[tuple[str, str]] = []
+    if code == 0:
+        for line in out.splitlines():
+            if "\t" not in line:
+                continue
+            orbit, path = line.split("\t", 1)
+            if orbit.startswith("orbit") and path.startswith("/") and "MISSING" not in path:
+                pairs.append((orbit, path.strip()))
+    if pairs:
+        return pairs
+    from tools.common.paths import resolve_root
+
+    local_root = resolve_root(root)
+    for orbit in ("orbit1", "orbit2", "orbit3"):
+        base = local_root / "outputs" / f"{obj}_{orbit}" / "splatfacto"
+        found = sorted(base.glob("*/config.yml")) if base.is_dir() else []
+        if not found:
+            continue
+        rel = found[-1].resolve().relative_to(local_root.resolve()).as_posix()
+        pairs.append((orbit, f"/root/SceneagentX/{rel}"))
+    if err:
+        sys.stderr.write(err)
+    if pairs:
+        return pairs
+    return _block_a_configs(obj, root)
+
+
+def _block_a_configs(obj: str, root: Path | None) -> list[tuple[str, str]]:
+    """Frozen configs named by the Block A record. A missing file is not a new train."""
+    from tools.common.paths import object_dir
+
+    path = object_dir(obj, root) / "ingest" / "block_a.json"
+    if not path.is_file():
+        return []
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    rows = loaded.get("orbits") if isinstance(loaded, dict) else None
+    if not isinstance(rows, list):
+        return []
+    pairs: list[tuple[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        orbit = row.get("orbit")
+        config = row.get("config")
+        if not isinstance(orbit, str) or not isinstance(config, str):
+            continue
+        if not orbit.startswith("orbit") or not config.startswith("/"):
+            continue
+        if row.get("train_finished") is not True:
+            continue
+        pairs.append((orbit, config))
+    return pairs
+
+
+def _sync_host_code(host) -> int:
+    from tools.pipeline import ssh_key_path
+
+    files = (
+        "tools/agent_loop.py",
+        "tools/task_spec.py",
+        "tools/pipeline.py",
+        "tools/gate_bypass.py",
+        "tools/block_b_job.py",
+        "tools/step01_colmap.py",
+        "tools/step02_splatfacto.py",
+        "tools/common/vlm.py",
+        "tools/can_instances.py",
+        "vast-cluster/scripts/object_semantics.py",
+        "vast-cluster/scripts/object_langsplat_b2.py",
+        "vast-cluster/scripts/object_langsplat_b3.py",
+        "vast-cluster/scripts/object_langsplat_b4.py",
+        "vast-cluster/scripts/object_cluster_can_orbit.py",
+        "vast-cluster/scripts/object_crop_iou.py",
+        "vast-cluster/scripts/object_splat_iou.py",
+    )
+    key = ssh_key_path()
+    root = Path(__file__).resolve().parents[1]
+    for rel in files:
+        local = root / rel
+        remote = "/root/SceneagentX/" + rel.replace("\\", "/")
+        parent = remote.rsplit("/", 1)[0]
+        made, _, err = _ssh(host, f"mkdir -p {parent}\n", timeout=60)
+        if made != 0:
+            sys.stderr.write(err or f"mkdir failed {rel}\n")
+            return made
+        done = subprocess.run(
+            [
+                "scp",
+                "-i",
+                str(key),
+                "-P",
+                str(host.port),
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-o",
+                "BatchMode=yes",
+                str(local),
+                f"root@{host.host}:{remote}",
+            ],
+            capture_output=True,
+            check=False,
+        )
+        if done.returncode != 0:
+            sys.stderr.write((done.stderr or b"").decode("utf-8", "replace"))
+            return int(done.returncode)
+        sys.stdout.write(f"copied {rel}\n")
+    return 0
+
+
+def _ssh(host, script: str, timeout: int = 120) -> tuple[int, str, str]:
+    from tools.pipeline import ssh_key_path
+
+    try:
+        done = subprocess.run(
+            [
+                "ssh",
+                "-i",
+                str(ssh_key_path()),
+                "-p",
+                str(host.port),
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-o",
+                "ConnectTimeout=30",
+                "-o",
+                "BatchMode=yes",
+                f"root@{host.host}",
+                "bash",
+                "-s",
+            ],
+            input=script.replace("\r", "").encode("utf-8"),
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return 2, "", str(exc)
+    return done.returncode, (done.stdout or b"").decode("utf-8", "replace"), (done.stderr or b"").decode("utf-8", "replace")
+
+
+def _remember_gpu(obj: str, host, out: str, err: str, code: int) -> None:
+    pid = ""
+    for line in (out or "").splitlines():
+        if line.startswith("STARTED") or line.startswith("ALREADY_RUNNING"):
+            parts = line.split()
+            if len(parts) > 1:
+                pid = parts[-1]
+    _skill_run_step.gpu = {
+        "instance_id": host.instance_id,
+        "host": host.host,
+        "port": host.port,
+        "pid": pid,
+        "log": f"/root/logs/{obj}_block_h.log",
+        "exit": code,
+        "achieved": False,
+        "stderr": (err or "")[-400:],
+    }
+
+
+def _skill_align(obj: str, root: Path | None) -> int:
+    from tools.align import run_align
+
+    return run_align(obj, root, rerun_orbits=False)
+
+
+def _skill_package(obj: str, root: Path | None) -> int:
+    from tools.common.paths import object_dir
+
+    folder = object_dir(obj, root)
+    if (folder / "scene.usdz").is_file() or (folder / "asset.usdz").is_file():
+        sys.stdout.write("package file present; not marked achieved\n")
+        return 2
+    sys.stdout.write("package missing; not invented\n")
+    return 2
+
+
+def _write_block_h(
+    obj: str,
+    root: Path | None,
+    walked: list[dict[str, Any]],
+    stopped: str | None,
+    caption: str = CAN_CAPTION,
+    prompt: str | None = None,
+    videos: list[str] | None = None,
+) -> None:
+    from tools.common.paths import object_dir
+
+    gpu = getattr(_skill_run_step, "gpu", None)
+    payload = {
+        "orchestrator": "SCENEAGENT-RUN-PIPELINE",
+        "achieved": False,
+        "m1_met": False,
+        "m2_met": False,
+        "milestone": False,
+        "stopped": stopped,
+        "caption": caption,
+        "skills": walked,
+        "gpu": gpu if isinstance(gpu, dict) else None,
+    }
+    if prompt is not None:
+        payload["prompt"] = prompt
+    if videos:
+        payload["videos"] = videos
+    folder = object_dir(obj, root)
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "block_h.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _prompt_source(videos: list[Path]) -> Path | None:
+    """The video whose frames are sampled for the prompt. Later orbits stay on disk."""
+    for path in videos:
+        if path.suffix.lower() in VIDEO_SUFFIXES:
+            return path
+    return videos[0] if videos else None
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
-    parser = argparse.ArgumentParser(description="Advance exactly one SceneAgent skill")
+    parser = argparse.ArgumentParser(description="Advance SceneAgent skills")
     parser.add_argument("obj", nargs="?", default="bottle")
+    parser.add_argument("--obj", dest="obj_name", default=None)
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--orchestrate", action="store_true", help="Walk Block H skills from SCENEAGENT-RUN-PIPELINE")
+    parser.add_argument("--bypass-gates", action="store_true", help="Set SCENEAGENT_BYPASS_GATES for this process")
+    parser.add_argument("--prompt", default=None, help="User pipeline prompt, stored before any Block H skill")
+    parser.add_argument("--input", action="append", type=Path, default=None, help="Input video. Repeat for each orbit.")
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="With --orchestrate, rebuild COLMAP and splatfacto even when checkpoints exist",
+    )
     parser.add_argument("--root", type=Path, default=None)
     parser.add_argument("--skill", default=None)
     args = parser.parse_args(argv)
+    obj = args.obj_name or args.obj
+    if args.bypass_gates:
+        from tools.gate_bypass import ENV_NAME
+
+        os.environ[ENV_NAME] = "1"
+    if args.orchestrate:
+        videos = list(args.input or [])
+        try:
+            return run_block_h(
+                obj,
+                args.root,
+                prompt=args.prompt,
+                source=_prompt_source(videos),
+                fresh=args.fresh,
+                videos=videos,
+            )
+        except UnknownSkillError as exc:
+            sys.stderr.write(f"{exc}\n")
+            return 2
+    if args.prompt is not None or args.input or args.fresh:
+        sys.stderr.write("pass --orchestrate to store --prompt and the input video\n")
+        return 2
     if not args.once:
-        sys.stderr.write("pass --once to advance one skill\n")
+        sys.stderr.write("pass --once to advance one skill, or --orchestrate to walk Block H\n")
         return 2
     planner = None if args.skill is None else (lambda _obj, _root, skill=args.skill: skill)
     try:
-        return advance_once(args.obj, args.root, planner=planner)
+        return advance_once(obj, args.root, planner=planner)
     except UnknownSkillError as exc:
         sys.stderr.write(f"{exc}\n")
         return 2

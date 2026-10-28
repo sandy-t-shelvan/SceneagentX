@@ -67,6 +67,10 @@ def _iterate_walk(obj: str, root: Path | None = None) -> int:
             root,
         )
         if code != 0:
+            from tools.gate_bypass import continue_past
+
+            if continue_past(obj, root, f"iterate.{block_id}", reason or f"{block_id} stopped", check="unmet"):
+                continue
             _write_log(obj, root, route, rows)
             sys.stdout.write(f"stopped at {block_id}\n")
             return code
@@ -273,6 +277,9 @@ def iterate_skill(obj: str, skill: str, root: Path | None = None, vlm_mode: str 
             f"{skill} stays not_started until Block 9 Isaac inspect has a real frame.",
             root,
         )
+        from tools.gate_bypass import continue_past
+
+        continue_past(obj, root, "held_skill", f"{skill} stays not_started", check="skipped")
         _log_try(obj, skill, 1, root, False, {"name": "held", "pass": False}, {"asked": False}, None, False)
         return 2
     spec = SKILL_STEPS.get(skill)
@@ -284,6 +291,15 @@ def iterate_skill(obj: str, skill: str, root: Path | None = None, vlm_mode: str 
         outputs = list(measure.get("outputs") or [])
         if not measure["pass"]:
             _log_try(obj, spec["skill"], try_n, root, False, measure, {"asked": False}, None, False, outputs)
+            from tools.gate_bypass import continue_past
+
+            continue_past(
+                obj,
+                root,
+                "measurement_gate",
+                str(measure.get("reason") or f"{spec['block']} measurement gate unmet"),
+                check="unmet",
+            )
             ask_question(obj, spec["block"], f"{spec['block']} failed the measurement gate. What should change?", root)
             return 2
         if vlm_mode == "off":
@@ -320,10 +336,16 @@ def iterate_skill(obj: str, skill: str, root: Path | None = None, vlm_mode: str 
             verdict = review(skill, images, spec["question"], names, record_path=record)
         except MissingReviewImage as exc:
             _log_try(obj, spec["skill"], try_n, root, False, measure, {"asked": False, "error": str(exc)}, None, False, outputs)
+            from tools.gate_bypass import continue_past
+
+            continue_past(obj, root, "vision_gate", str(exc), check="unmet")
             ask_question(obj, spec["block"], f"{spec['block']} had no review picture. What should change?", root)
             return 2
         except (VlmError, OSError, ValueError, json.JSONDecodeError) as exc:
             _log_try(obj, spec["skill"], try_n, root, False, measure, {"asked": False, "error": str(exc)}, None, False, outputs)
+            from tools.gate_bypass import continue_past
+
+            continue_past(obj, root, "vision_gate", str(exc), check="unmet")
             ask_question(obj, spec["block"], f"{spec['block']} vision gate failed. What should change?", root)
             return 2
         vision = {
@@ -338,8 +360,12 @@ def iterate_skill(obj: str, skill: str, root: Path | None = None, vlm_mode: str 
             return 0
         parameter = verdict["correction"]["parameter"]
         value = verdict["correction"]["value"]
+        vision_gate = "vlm_confidence" if verdict.get("confidence_unmet") is True else "vision_gate"
         if parameter not in names:
             _log_try(obj, spec["skill"], try_n, root, False, measure, vision, None, False, outputs)
+            from tools.gate_bypass import continue_past
+
+            continue_past(obj, root, vision_gate, f"{spec['block']} vision gate unmet", check="unmet")
             ask_question(obj, spec["block"], f"{spec['block']} proposed a disallowed parameter. What should change?", root)
             return 2
         if try_n == 2:
@@ -355,6 +381,9 @@ def iterate_skill(obj: str, skill: str, root: Path | None = None, vlm_mode: str 
                 False,
                 outputs,
             )
+            from tools.gate_bypass import continue_past
+
+            continue_past(obj, root, "second_fault", f"{spec['block']} used its two tries", check="unmet")
             ask_question(obj, spec["block"], f"{spec['block']} used its two tries. What should change on the next try?", root)
             return 2
         _apply_one(obj, root, str(parameter), value)
@@ -370,6 +399,9 @@ def iterate_skill(obj: str, skill: str, root: Path | None = None, vlm_mode: str 
             False,
             outputs,
         )
+    from tools.gate_bypass import continue_past
+
+    continue_past(obj, root, "second_fault", f"{spec['block']} stopped", check="unmet")
     ask_question(obj, spec["block"], f"{spec['block']} stopped. What should change on the next try?", root)
     return 2
 

@@ -334,10 +334,35 @@ def _job_body(
             ]
         )
     summary_orbits = ", ".join(repr(orbit) for orbit, _config in orbits)
+    from tools.gate_bypass import enabled
+
+    bypass = enabled()
+    backup_fail = "echo BACKUP_UNMET" if bypass else "echo BACKUP_FAIL json; exit 4"
+    orbit_backup_fail = 'echo BACKUP_UNMET "$orbit"' if bypass else 'echo BACKUP_FAIL "$orbit"; exit 4'
+    codebook_backup_fail = 'echo BACKUP_UNMET "$codebook_name"' if bypass else 'echo BACKUP_FAIL "$codebook_name"; exit 4'
+    semantics_backup_fail = "echo BACKUP_UNMET semantics" if bypass else "echo BACKUP_FAIL semantics; exit 4"
+    if bypass:
+        b2_stop = "\n".join(
+            [
+                'if [ "$b2_rc" -ne 0 ]; then',
+                '  mark "B2_UNMET codebook"',
+                "fi",
+            ]
+        )
+    else:
+        b2_stop = "\n".join(
+            [
+                'if [ "$b2_rc" -ne 0 ]; then',
+                "  mark STOP_AFTER_B2",
+                '  exit "$b2_rc"',
+                "fi",
+            ]
+        )
     lines = [
         "set -u",
         "export MAMBA_ROOT_PREFIX=/root/.local/share/mamba",
         "export PYTHONUNBUFFERED=1",
+        *(["export SCENEAGENT_BYPASS_GATES=1"] if bypass else []),
         f"ROOT={root}",
         'cd "$ROOT"',
         'GSAM="$MAMBA_ROOT_PREFIX/envs/gsam2/bin/python"',
@@ -350,19 +375,19 @@ def _job_body(
         f'DEST="$ROOT/data/{name}/ingest/block_b_first"',
         'if [ ! -f "$DEST/KEEP" ]; then',
         '  mkdir -p "$DEST/ingest" "$DEST/masks" "$DEST/semantics"',
-        f'  cp -a "$ROOT"/data/{name}/ingest/block_b*.json "$DEST/ingest/" || {{ echo BACKUP_FAIL json; exit 4; }}',
+        f'  cp -a "$ROOT"/data/{name}/ingest/block_b*.json "$DEST/ingest/" || {{ {backup_fail}; }}',
         "  for orbit in " + " ".join(orbit for orbit, _config in orbits) + "; do",
         f'    if [ -d "$ROOT/data/{name}/masks/$orbit" ]; then',
-        f'      cp -a "$ROOT/data/{name}/masks/$orbit" "$DEST/masks/" || {{ echo BACKUP_FAIL "$orbit"; exit 4; }}',
+        f'      cp -a "$ROOT/data/{name}/masks/$orbit" "$DEST/masks/" || {{ {orbit_backup_fail}; }}',
         "    fi",
         "  done",
         "  for codebook_name in codebook.json codebook_orbit2.json codebook_orbit3.json; do",
         f'    if [ -f "$ROOT/data/{name}/$codebook_name" ]; then',
-        f'      cp -a "$ROOT/data/{name}/$codebook_name" "$DEST/" || {{ echo BACKUP_FAIL "$codebook_name"; exit 4; }}',
+        f'      cp -a "$ROOT/data/{name}/$codebook_name" "$DEST/" || {{ {codebook_backup_fail}; }}',
         "    fi",
         "  done",
         f'  if [ -d "$ROOT/data/{name}/semantics" ]; then',
-        f'    cp -a "$ROOT/data/{name}/semantics/." "$DEST/semantics/" || {{ echo BACKUP_FAIL semantics; exit 4; }}',
+        f'    cp -a "$ROOT/data/{name}/semantics/." "$DEST/semantics/" || {{ {semantics_backup_fail}; }}',
         "  fi",
         '  date -u > "$DEST/KEEP"',
         "  mark BACKUP_OK",
@@ -388,10 +413,7 @@ def _job_body(
         f'"$SA" -u vast-cluster/scripts/object_langsplat_b2.py --obj {name} --root "$ROOT"',
         "b2_rc=$?",
         'mark "B2_EXIT $b2_rc"',
-        'if [ "$b2_rc" -ne 0 ]; then',
-        "  mark STOP_AFTER_B2",
-        '  exit "$b2_rc"',
-        "fi",
+        b2_stop,
         "",
         "run_orbit() {",
         '  orbit="$1"',

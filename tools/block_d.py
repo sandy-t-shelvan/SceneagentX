@@ -208,6 +208,15 @@ class PhysicsPrior:
 def run_learned_prior(x: np.ndarray, checkpoint: Path | None) -> dict[str, Any]:
     """Run a saved prior. A missing checkpoint is a hard refuse, not an untrained forward."""
     if checkpoint is None or not Path(checkpoint).is_file():
+        from tools.gate_bypass import continue_past
+
+        continue_past(
+            None,
+            None,
+            "learned_prior_checkpoint",
+            "learned prior checkpoint is missing",
+            check="unmet",
+        )
         raise GateError("learned prior checkpoint is missing")
     features = np.asarray(x, dtype=np.float64)
     if features.ndim != 2:

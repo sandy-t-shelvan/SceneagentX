@@ -240,9 +240,11 @@ def _normalize(parsed: dict[str, Any], allowed: list[str]) -> dict[str, Any]:
     reason = str(correction.get("reason") or "")
     evidence = str(parsed.get("evidence") or "")
 
+    confidence_unmet = False
     if verdict == "pass" and confidence < 0.6:
         verdict = "fail"
         problem = "other"
+        confidence_unmet = True
 
     if verdict == "fail" and parameter not in allowed:
         parameter = None
@@ -255,6 +257,7 @@ def _normalize(parsed: dict[str, Any], allowed: list[str]) -> dict[str, Any]:
         "problem": problem,
         "correction": {"parameter": parameter, "value": value, "reason": reason},
         "evidence": evidence,
+        "confidence_unmet": confidence_unmet,
     }
 
 

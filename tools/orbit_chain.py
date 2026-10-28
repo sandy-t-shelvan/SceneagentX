@@ -992,6 +992,9 @@ def _run_d14(can: Path, chain: Path, inside: np.ndarray | None) -> dict[str, Any
     try:
         ran = run_learned_prior(np.load(prior), checkpoint)
     except GateError as exc:
+        from tools.gate_bypass import continue_past
+
+        continue_past("can", can.parent.parent, "learned_prior_checkpoint", str(exc), check="unmet")
         return {
             "part": _step(
                 "D1.4",

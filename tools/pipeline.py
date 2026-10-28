@@ -48,15 +48,24 @@ def run(
     n_views: int = 8,
     prompt: str | None = None,
 ) -> int:
+    held = False
+
+    def hold(gate: str, detail: str, check: str = "unmet") -> bool:
+        nonlocal held
+        if _bypass_stop(obj, root, gate, detail, check=check):
+            held = True
+            return True
+        return False
+
     if prompt is not None:
         code = accept_pipeline_prompt(obj, prompt, root, source=source)
-        if code != 0:
+        if code != 0 and not hold("pipeline_prompt", "the pipeline prompt was not stored"):
             return code
         code = gate_detected_target(obj, root)
-        if code != 0:
+        if code != 0 and not hold("room_mask", "target mask check stopped"):
             return code
     code = apply_mask_retry(obj, root)
-    if code != 0:
+    if code != 0 and not hold("room_mask_retry", "the room-mask retry stopped"):
         return code
     last = get_block(through)
     doc = load_status(obj, root, create=True)
@@ -117,14 +126,14 @@ def run(
             code = check_object(obj, root)
         elif block.id in COLMAP_BLOCKS and colmap_refused(load_status(obj, root)):
             sys.stderr.write(refusal_message())
-            return 2
+            code = 2
         elif block.id in COLMAP_BLOCKS and find_video(obj, root) is None:
             record_absent(obj, root)
             sys.stderr.write(
                 "COLMAP and splatfacto require data/<obj>/raw/orbit1.mp4. "
                 "They were not started on this input.\n"
             )
-            return 2
+            code = 2
         elif block.id == "B2":
             code = push_missing_raw_videos(vast.host, obj, root) if vast is not None else 0
             if code == 0:
@@ -152,12 +161,35 @@ def run(
                 f"Reconstruction stops at B4. This block needs the GPU tools listed in env/{_env_for(block.id)}.yml "
                 "and third-party checkpoints that are not vendored in this repo.\n"
             )
-            return 3
+            code = 3
         if code != 0:
+            gate, detail, check = _block_gate(block.id, code)
+            if hold(gate, detail, check):
+                continue
             sys.stdout.flush()
             sys.stderr.write(f"Stopped at {block.id}. Later blocks were not started.\n")
             return code
-    return 0
+    return 1 if held else 0
+
+
+def _bypass_stop(obj: str, root: Path | None, gate: str, detail: str, *, check: str = "unmet") -> bool:
+    """Record an unmet gate when the switch is on. True is not a pass."""
+    from tools.gate_bypass import continue_past
+
+    return continue_past(obj, root, gate, detail, check=check)
+
+
+def _block_gate(block_id: str, code: int) -> tuple[str, str, str]:
+    """Name the stop a block just hit. The check stays unmet or skipped."""
+    if block_id == "B2":
+        return "colmap_registration", f"B2 exited {code}", "unmet"
+    if block_id == "B4":
+        return "metres_per_unit", f"B4 exited {code}", "unmet"
+    if block_id == "B5":
+        return "pipeline_not_implemented", f"{block_id} is not implemented", "skipped"
+    if code == 3:
+        return "pipeline_not_implemented", f"{block_id} is not implemented", "skipped"
+    return f"pipeline.{block_id}", f"{block_id} exited {code}", "unmet"
 
 
 def mask_retry_commands(obj: str, root: Path | None = None) -> list[list[str]]:

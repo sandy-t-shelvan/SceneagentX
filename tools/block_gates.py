@@ -215,6 +215,9 @@ def stop_after_second_part_fault(obj: str, root: Path | None, verdicts: list[str
             faults += 1
         if faults >= 2:
             ask_question(obj, "B9", "B9 failed a second review. What should change on the next try?", root)
+            from tools.gate_bypass import continue_past
+
+            continue_past(obj, root, "second_fault", "B9 second review wrote question.json", check="unmet")
             return 2
     if faults:
         ask_question(obj, "B9", "B9 failed its review. What should change on the next try?", root)

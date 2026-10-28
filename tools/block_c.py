@@ -668,6 +668,7 @@ def run_c1(obj: str, orbit: str | int, root: Path | None = None) -> dict[str, An
         row["infill"] = "skipped"
         _apply_block_b(row, block_b, None)
         _store_orbit(name, root, orbit_id, row)
+        _note_infill_gate(name, root, row)
         return row
     try:
         flags = np.asarray(np.load(mask_path), dtype=bool).reshape(-1)
@@ -676,6 +677,7 @@ def run_c1(obj: str, orbit: str | int, root: Path | None = None) -> dict[str, An
         row["note"] = "gaussian_in_mask.npy could not be read. The crop was not written."
         _apply_block_b(row, block_b, None)
         _store_orbit(name, root, orbit_id, row)
+        _note_infill_gate(name, root, row)
         return row
     n_inside = int(flags.sum())
     n_outside = int(flags.size - n_inside)
@@ -697,6 +699,7 @@ def run_c1(obj: str, orbit: str | int, root: Path | None = None) -> dict[str, An
         row["infill_required"] = True
         _apply_block_b(row, block_b, (n_inside, n_outside))
         _store_orbit(name, root, orbit_id, row)
+        _note_infill_gate(name, root, row)
         return row
     temps = (
         paths["object_ply"].with_name("object.partial.ply"),
@@ -730,6 +733,7 @@ def run_c1(obj: str, orbit: str | int, root: Path | None = None) -> dict[str, An
         row["crop"] = decision
         _apply_block_b(row, block_b, (n_inside, n_outside))
         _store_orbit(name, root, orbit_id, row)
+        _note_infill_gate(name, root, row)
         return row
     finally:
         _unlink(temps)
@@ -778,7 +782,25 @@ def run_c1(obj: str, orbit: str | int, root: Path | None = None) -> dict[str, An
     )
     _apply_block_b(row, block_b, (n_inside, n_outside))
     _store_orbit(name, root, orbit_id, row)
+    _note_infill_gate(name, root, row)
     return row
+
+
+def _note_infill_gate(name: str, root: Path | None, row: dict[str, Any]) -> None:
+    """A skipped or failed infill stays unmet. The switch only lets the walk continue."""
+    from tools.gate_bypass import continue_past
+
+    if row.get("m3_met") is True and row.get("infill") == "ran":
+        return
+    infill = row.get("infill")
+    check = "skipped" if infill == "skipped" else "unmet"
+    continue_past(
+        name,
+        root,
+        "block_c_infill",
+        f"crop {row.get('crop')} infill {infill}; m3 stays unmet",
+        check=check,
+    )
 
 
 def record_later_stages(

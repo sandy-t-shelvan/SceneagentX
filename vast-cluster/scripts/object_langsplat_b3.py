@@ -70,6 +70,18 @@ def _task_job(folder: Path) -> str | None:
     return None
 
 
+def _note_field_refusal(obj: str, root: Path, detail: str) -> None:
+    """Record the refusal when the bypass switch is on. The exit code stays a failure."""
+    try:
+        repo = Path(__file__).resolve().parents[2]
+        if str(repo) not in sys.path:
+            sys.path.insert(0, str(repo))
+        from tools.gate_bypass import continue_past
+    except Exception:
+        return
+    continue_past(str(obj), root, "feature_field", detail, check="unmet")
+
+
 def _feature_field_refusal(lift, job=None) -> str | None:
     """Half-scene refusal applies to a room job. An orbit job skips it."""
     if job == "orbit":
@@ -389,6 +401,7 @@ def main(argv: list[str] | None = None) -> int:
                 "prior_measurement_kept": True,
             })
             print(f"B3_REFUSE {refusal}", flush=True)
+            _note_field_refusal(args.obj, args.root, refusal)
             return 2
 
     if not torch.cuda.is_available():
@@ -428,6 +441,7 @@ def main(argv: list[str] | None = None) -> int:
             "prior_measurement_kept": True,
         })
         print("B3_REFUSE B2 latents are all zero; feature field was not trained", flush=True)
+        _note_field_refusal(args.obj, args.root, "B2 latents are all zero; feature field was not trained")
         return 2
 
     config = _config_for(args.root, args.obj, orbit)
@@ -550,6 +564,7 @@ def main(argv: list[str] | None = None) -> int:
                         "prior_measurement_kept": True,
                     })
                     print(f"B3_REFUSE {refusal}", flush=True)
+                    _note_field_refusal(args.obj, args.root, refusal)
                     return 2
     features = torch.nn.Parameter(init)
     opt = torch.optim.Adam([features], lr=args.lr)

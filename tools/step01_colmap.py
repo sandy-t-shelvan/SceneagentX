@@ -231,6 +231,17 @@ def _finish(
         error = record.get("error")
         if error:
             sys.stderr.write(f"{error}\n")
+        from tools.gate_bypass import continue_past
+
+        registered = payload.get("registered_pct")
+        reproj = payload.get("mean_reproj_px")
+        continue_past(
+            obj,
+            root,
+            "colmap_registration",
+            f"orbit{orbit} registered_pct {registered} mean_reproj_px {reproj} gates {payload.get('gates')}",
+            check="unmet",
+        )
     return 0 if passed else 1
 
 
