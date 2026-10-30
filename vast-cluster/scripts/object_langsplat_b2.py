@@ -343,7 +343,11 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(__file__).resolve().parents[2]
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
-    from tools.block_b_job import OPEN_CLIP_MISSING, codebook_collapsed
+    from tools.block_b_job import OPEN_CLIP_MISSING, codebook_collapsed, mask_downstream_block_reason
+
+    blocked = mask_downstream_block_reason(folder)
+    if blocked:
+        return _write_fail(folder, blocked)
 
     try:
         import open_clip  # noqa: F401

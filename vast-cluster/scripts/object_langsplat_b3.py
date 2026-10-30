@@ -381,6 +381,32 @@ def main(argv: list[str] | None = None) -> int:
         print(f"B3_REFUSE unsupported orbit {args.orbit}", flush=True)
         return 2
     orbit = args.orbit
+    repo = Path(__file__).resolve().parents[2]
+    if str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+    try:
+        from tools.block_b_job import mask_downstream_block_reason
+    except Exception:
+        mask_downstream_block_reason = None
+    if mask_downstream_block_reason is not None:
+        blocked = mask_downstream_block_reason(folder)
+        if blocked:
+            refused = folder / "semantics" / orbit / "feature_field_refused.json"
+            if orbit == ORBIT:
+                refused = folder / "semantics" / "feature_field_refused.json"
+            _dump(
+                refused,
+                {
+                    "feature_field": "refused",
+                    "achieved": False,
+                    "orbit": orbit,
+                    "reason": blocked,
+                    "prior_measurement_kept": True,
+                },
+            )
+            print(f"B3_REFUSE {blocked}", flush=True)
+            _note_field_refusal(args.obj, args.root, blocked)
+            return 2
     job = _task_job(folder)
     mask_record_path = folder / "masks" / orbit / "object.json"
     if mask_record_path.is_file():

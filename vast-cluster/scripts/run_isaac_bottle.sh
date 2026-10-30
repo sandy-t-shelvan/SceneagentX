@@ -28,7 +28,7 @@ if [ -x /root/jammy/usr/bin/python3.11 ]; then
   if ! printf '%s' "$probe" | grep -q 'ISAACLAB_SPEC /'; then
     code=127
   else
-  timeout --signal=KILL 180 chroot /root/jammy /opt/isaac/bin/python /root/isaac_bottle_frame.py \
+  timeout --signal=KILL 600 chroot /root/jammy /opt/isaac/bin/python /root/isaac_bottle_frame.py \
     --headless \
     --usda /root/SceneagentX/data/bottle/scene.usda \
     --png /root/SceneagentX/data/bottle/inspect/frame_000.png \
@@ -60,7 +60,7 @@ record = {
 if not ok:
     if code in (124, 137):
         record["error"] = "timeout"
-        record["reason"] = "Isaac did not return a frame within 180 seconds"
+        record["reason"] = "Isaac did not return a frame within 600 seconds"
     elif code == 127:
         record["error"] = "Isaac python was not found"
         record["reason"] = "Isaac Sim 5.1 files are on the host but the interpreter did not start"

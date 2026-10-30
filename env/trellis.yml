@@ -11,3 +11,4 @@ dependencies:
   - pip:
       - --extra-index-url https://download.pytorch.org/whl/cu121
       - torch==2.1.2+cu121
+      - numpy>=1.26,<2

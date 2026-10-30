@@ -43,6 +43,8 @@ export CUDA_HOME=/usr/local/cuda-12.1
 export PATH="$CUDA_HOME/bin:$PATH"
 export FORCE_CUDA=1
 nvcc --version | tail -n 1
+# Torch 2.1 cpp_extension still imports pkg_resources; setuptools>=80 dropped it.
+micromamba run -n 2dgs python -m pip install 'setuptools<80' wheel
 cd "$DEST"
 micromamba run -n 2dgs python -m pip install --no-build-isolation ./submodules/diff-surfel-rasterization ./submodules/simple-knn
 

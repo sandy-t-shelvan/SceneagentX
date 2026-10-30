@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Added
+- tools/isaac_install_gate.py: laptop decisions for Isaac Sim/Lab install order; refuses llvmpipe-only Vulkan and keeps the seven torch envs untouched
+- tests/test_isaac_install_gate.py: llvmpipe-only refuses install, GPU+llvmpipe allows, and env pin paths stay outside the Isaac venv
 - tools/metric_depth.py: metric scale from Depth Anything / FoundationStereo / Polycam / ruler / tag36h11; refuses VLM model_knowledge as metres_per_unit; missing weights stay null ScoreOnly
 - tests/test_metric_depth.py: mocked depth pairs write finite metres_per_unit, missing weights leave null and unachieved, VLM method refused
 - tools/metric_depth.py: predict_metric_depth runs Depth Anything 3 when weights+package are ready; recovers metres_per_unit from metric/COLMAP depth pairs; missing frames/transforms stamp not_measured
@@ -37,6 +39,8 @@
 - tests/test_object_block_b_report.py: a physics-vector npz is not a LangSplat codebook, and the written score keeps miou null
 
 ### Changed
+- vast-cluster/scripts/object_langsplat_b2.py: refuse codebook train while mask_downstream_block_reason is set
+- vast-cluster/scripts/object_langsplat_b3.py: refuse feature-field train while mask_downstream_block_reason is set
 - tools/agent_loop.py: SCENEAGENT-INGEST-DATA recovers metric scale after COLMAP/splat (or when checkpoints are kept); missing depth stays not_measured
 - tools/orbit_blocks.py: _keep_unmeasured_scale tries metric_depth recover before writing not_measured
 - tools/design_workspace.py: _write_scale uses metric_depth recover instead of always stamping not_measured
