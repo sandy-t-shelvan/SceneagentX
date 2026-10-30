@@ -208,7 +208,12 @@ def crop_decision(folder: Path, lift: dict[str, Any] | None, n_outside: int | No
     stays refused. An orbit job skips that half-scene test and does not
     schedule infill. A room-covering mask is still not a crop when every
     Gaussian is inside it, which means the object is the whole splat.
+    A pending mask retry or a stopped target-mask check also refuses the crop.
     """
+    from tools.block_b_job import mask_downstream_block_reason
+
+    if mask_downstream_block_reason(Path(folder)):
+        return "refused"
     record = lift if isinstance(lift, dict) else {}
     outside = None if isinstance(n_outside, bool) or n_outside is None else int(n_outside)
     if _capture_job(Path(folder)) == "orbit":
@@ -393,6 +398,15 @@ def _apply_block_b(row: dict[str, Any], block_b: dict[str, Any], counts: tuple[i
 
 
 def _refuse_note(lift: dict[str, Any], field: str, folder: Path | None = None) -> str:
+    from tools.block_b_job import mask_downstream_block_reason
+
+    if folder is not None:
+        blocked = mask_downstream_block_reason(Path(folder))
+        if blocked:
+            note = blocked + " The crop was not written. Infill was not run. It is not a pass."
+            if field == "refused":
+                note += " The feature field stays refused and was not trained."
+            return note
     note = (
         "Mask covers the room "
         f"(covers_room {lift.get('covers_room') is True}, "

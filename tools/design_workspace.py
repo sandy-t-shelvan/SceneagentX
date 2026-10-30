@@ -60,10 +60,22 @@ def _write_ingest(obj: str, folder: Path, root: Path | None) -> Path:
 
 
 def _write_scale(folder: Path) -> Path:
+    """Try metric depth / tag; leave metres null when unmeasured (never VLM)."""
+    from tools.metric_depth import is_measured_record, recover_metric_scale, scale_path
+
+    obj = folder.name
+    root = folder.parent.parent if folder.parent.name == "data" else None
+    try:
+        record = recover_metric_scale(obj, root, orbit=1)
+        if is_measured_record(record) or scale_path(obj, root).is_file():
+            return scale_path(obj, root)
+    except Exception:
+        pass
     record = {
         "metres_per_unit": None,
         "method": "not_measured",
-        "reason": "No AprilTag board or known length was recorded for this object.",
+        "achieved": False,
+        "reason": "No AprilTag board, metric depth, or known length was recorded for this object.",
     }
     return _dump(folder / "ingest" / "scale.json", record)
 

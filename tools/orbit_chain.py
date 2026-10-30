@@ -347,7 +347,11 @@ def run_block_e(can: Path, orbit: str, d_output: Path) -> dict[str, Any]:
 
 
 def run_block_f(can: Path, orbit: str, e_output: Path) -> dict[str, Any]:
-    """Run F on E's folder. The review camera draws the mesh. A missing scale is not a pass."""
+    """Run F on E's folder. The review camera draws the mesh.
+
+    A missing metres_per_unit stays in the reason and keeps achieved false
+    (ScoreOnly). It is not a HardStop when Block H walks past align/package.
+    """
     can = _require_can(can)
     orbit = _orbit(orbit)
     folder = _require_chain(can, e_output)

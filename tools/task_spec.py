@@ -306,9 +306,6 @@ def gate_detected_target(obj: str, root: Path | None = None) -> int:
     if recorded.get("action") == "stop":
         _write_stop_line(recorded)
         return 2
-    overlay = find_target_overlay(folder)
-    if overlay is None:
-        return 0
     try:
         spec = load_request(folder)
     except (OSError, json.JSONDecodeError, FileNotFoundError) as exc:
@@ -319,9 +316,29 @@ def gate_detected_target(obj: str, root: Path | None = None) -> int:
         sys.stderr.write("task spec has no target\n")
         return 2
     target = target.strip()
+    overlay = find_target_overlay(folder)
+    if overlay is None:
+        return 0
     try:
         verdict = review_target_overlay(overlay, target, folder / "reviews" / "target_mask_1.json")
-    except (VlmError, MissingReviewImage, OSError, ValueError, json.JSONDecodeError) as exc:
+    except MissingReviewImage as exc:
+        _write_json(
+            folder / "reviews" / "target_mask_check.json",
+            {
+                "prompt": spec.get("prompt"),
+                "target": target,
+                "attempts": 0,
+                "action": "stop",
+                "reason": str(exc) or "no target overlay",
+                "retrain": False,
+                "sisters": False,
+                "asked": False,
+                "feature_field": "not_started",
+            },
+        )
+        sys.stderr.write("target overlay PNG is missing; asked stays false\n")
+        return 2
+    except (VlmError, OSError, ValueError, json.JSONDecodeError) as exc:
         sys.stderr.write(f"{exc}\n")
         return 2
     action = next_mask_action(verdict, 1)
@@ -348,6 +365,7 @@ def gate_detected_target(obj: str, root: Path | None = None) -> int:
                 "reason": action.get("reason"),
                 "retrain": False,
                 "sisters": False,
+                "asked": True,
                 "feature_field": "not_started",
                 "view_fractions": fractions,
             },

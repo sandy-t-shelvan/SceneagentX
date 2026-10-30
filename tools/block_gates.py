@@ -691,6 +691,7 @@ def record_unstarted_gates(obj: str, root: Path | None = None, *, host_note: str
 
 
 def _measure_ingest(obj: str, folder: Path) -> dict[str, Any]:
+    """pass = skill finished with stamps; achieved/m1_met stay false without metres."""
     scale_path = folder / "ingest" / "scale.json"
     scale = _load_json(scale_path)
     report = _load_json(folder / "ingest" / "ingest_report.json")
@@ -700,8 +701,10 @@ def _measure_ingest(obj: str, folder: Path) -> dict[str, Any]:
     unmeasured = (not exists) or method in (None, "", "not_measured") or metres is None
     claimed = report.get("m1_met") is True
     retrained = _splat_retrained(folder, report)
-    m1_met = False if unmeasured else claimed
-    passed = exists and not unmeasured and not retrained and m1_met is True
+    # Honesty: never meet M1 without a measured metres_per_unit.
+    m1_met = False if unmeasured else bool(claimed and metres is not None)
+    # ScoreOnly: stamped scale (even unmeasured) finishes the skill for iterate.
+    finished = exists and not retrained
     if retrained:
         reason = "splat was retrained"
     elif unmeasured:
@@ -710,8 +713,10 @@ def _measure_ingest(obj: str, folder: Path) -> dict[str, Any]:
         reason = ""
     return {
         "name": "scale",
-        "pass": passed,
+        "pass": finished,
+        "achieved": False,
         "method": method,
+        "metres_per_unit": metres,
         "m1_met": m1_met,
         "retrained": retrained,
         "reason": reason,
@@ -720,6 +725,7 @@ def _measure_ingest(obj: str, folder: Path) -> dict[str, Any]:
 
 
 def _measure_see(folder: Path) -> dict[str, Any]:
+    """pass = projected crop on disk; skipped infill is ScoreOnly, not a blocker."""
     record = _load_json(folder / "masks" / "object.json")
     projected = record.get("projected") is True
     label = str(record.get("label") or folder.name)
@@ -735,6 +741,7 @@ def _measure_see(folder: Path) -> dict[str, Any]:
     result = {
         "name": "projection",
         "pass": projected and ply_ok,
+        "achieved": False,
         "projected": projected,
         "object_ply": ply_ok,
         "infill": state,
@@ -742,7 +749,7 @@ def _measure_see(folder: Path) -> dict[str, Any]:
         "outputs": outputs,
     }
     if state == "skipped":
-        result["reason"] = "infill skipped is not a pass"
+        result["reason"] = "infill skipped is ScoreOnly; not a pass and not a mid-pipeline stop"
     return result
 
 
@@ -825,9 +832,17 @@ def _measure_parts(folder: Path) -> dict[str, Any]:
 
 
 def _measure_physics(folder: Path) -> dict[str, Any]:
+    """pass = physics.json stamped; mass_checked false is ScoreOnly, not a blocker."""
     record = _load_json(folder / "physics.json")
     if not record:
-        return {"name": "physics", "pass": False, "mass_checked": False, "learned_prior": False, "outputs": []}
+        return {
+            "name": "physics",
+            "pass": False,
+            "achieved": False,
+            "mass_checked": False,
+            "learned_prior": False,
+            "outputs": [],
+        }
     per = record.get("per_gaussian") if isinstance(record.get("per_gaussian"), dict) else {}
     learned = record.get("learned_prior") is True or per.get("learned_prior") is True
     weighed = _weighed_kg(record)
@@ -838,10 +853,12 @@ def _measure_physics(folder: Path) -> dict[str, Any]:
     if weighed is None:
         mass_checked = False
     rigidity_ok, rigidity_name = _rigidity_gate(record)
-    passed = mass_checked and rigidity_ok and not learned
+    # Skill finished when the VLM/physics stamp exists; mass gates stay unmet.
+    finished = bool(record) and not learned and rigidity_ok
     return {
         "name": "physics",
-        "pass": passed,
+        "pass": finished,
+        "achieved": False,
         "mass_checked": mass_checked,
         "rigidity": rigidity_name,
         "learned_prior": True if learned else False,
@@ -890,6 +907,7 @@ def _measure_joints(obj: str, folder: Path) -> dict[str, Any]:
 
 
 def _measure_mesh(folder: Path) -> dict[str, Any]:
+    """pass = mesh + score stamped; achieved needs cm metrics and an honest claim."""
     score_path = folder / "mesh_score.json"
     score = _load_json(score_path)
     mesh = _extracted_mesh(folder)
@@ -917,13 +935,15 @@ def _measure_mesh(folder: Path) -> dict[str, Any]:
     )
     return {
         "name": "mesh",
-        "pass": achieved,
+        "pass": True,
         "achieved": achieved,
+        "reason": "" if achieved else "mesh stamped; Chamfer/F1 unmet or metres missing",
         "outputs": ["mesh_score.json"],
     }
 
 
 def _measure_align(folder: Path) -> dict[str, Any]:
+    """pass = residuals stamped when frames+mesh exist; orient skip is ScoreOnly."""
     frames = _has_frames(folder)
     mesh = _extracted_mesh(folder)
     background = _has_background(folder)
@@ -943,14 +963,24 @@ def _measure_align(folder: Path) -> dict[str, Any]:
     else:
         orient_state = "measured"
         orient_achieved = orient.get("achieved") is True and orient.get("skipped") is not True
-    passed = residuals and orient_achieved and background and frames and mesh is not None
+    # Iterate may continue once residuals are stamped; orientation/metres stay ScoreOnly.
+    finished = bool(frames and mesh is not None and residuals)
     if align.get("achieved") is True and (not frames or mesh is None):
-        passed = False
+        finished = False
+    metres = align.get("metres_per_unit")
+    achieved = bool(
+        finished
+        and orient_achieved
+        and background
+        and align.get("achieved") is True
+        and isinstance(metres, (int, float))
+        and not isinstance(metres, bool)
+    )
     return {
         "name": "align",
-        "pass": passed,
+        "pass": finished,
         "state": state,
-        "achieved": False if not passed else True,
+        "achieved": achieved,
         "orientation": orient_state,
         "orientation_achieved": False if not background else orient_achieved,
         "outputs": ["align.json"] if residuals else [],
@@ -958,11 +988,13 @@ def _measure_align(folder: Path) -> dict[str, Any]:
 
 
 def _measure_inspect(folder: Path) -> dict[str, Any]:
+    """A real frame is required for the inspect measurement gate; Block H skips are ScoreOnly."""
     frame = folder / "inspect" / "frame_000.png"
     ok = _frame_ok(frame)
     return {
         "name": "inspect",
         "pass": ok,
+        "achieved": False,
         "rendered": ok,
         "reason": "" if ok else "frame_000.png missing",
         "outputs": ["inspect/frame_000.png"] if ok else [],

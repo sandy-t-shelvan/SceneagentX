@@ -3,6 +3,8 @@
 
 Uses the existing checkpoint. Does not retrain. Does not write data/bottle.
 achieved stays false. The previous full-scene IoU is kept as full_scene_iou.
+Membership is Harvard eq.1: project inside the mask and near the front surface
+(εa=0.08, εr=0.03 from tools.block_b_job). Far Gaussians drop.
 When every eligible crop covers the room, a room job leaves gaussian_in_mask.npy
 in place and does not train features or infill. An orbit job still keeps a crop.
 """
@@ -32,6 +34,11 @@ from object_splat_iou import (
     mask_iou,
     reject_object,
 )
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from tools.block_b_job import FRONT_ABS_SLACK, FRONT_REL_SLACK
 
 OVERSEG_FRAC = 0.90
 OPACITY_MIN = 0.05
@@ -194,7 +201,11 @@ def main(argv: list[str] | None = None) -> int:
                 flat = vi[valid] * width + ui[valid]
                 nearest = torch.full((height * width,), torch.inf, device=means.device, dtype=depth.dtype)
                 nearest.scatter_reduce_(0, flat, depth[valid], reduce="amin", include_self=True)
-                keep = depth[valid] <= nearest[flat] + 1e-4
+                # Harvard eq.1: in-mask Gaussians near the front surface
+                # (|z − z_front| ≤ εa + εr·|z_front|; εa=0.08, εr=0.03).
+                front_d = nearest[flat]
+                slack = FRONT_ABS_SLACK + FRONT_REL_SLACK * front_d.abs()
+                keep = (depth[valid] - front_d).abs() <= slack
                 chosen = torch.where(valid)[0][keep]
                 mask_tensor = torch.as_tensor(mask, device=means.device)
                 hit = mask_tensor[vi[chosen], ui[chosen]] > 127
@@ -321,9 +332,6 @@ def main(argv: list[str] | None = None) -> int:
         anchor_keep[anchor] = True
         policy_keeps.append(("anchor_only", anchor_keep, {"applied": False, "anchor_front": int(anchor.numel())}))
 
-    repo_root = Path(__file__).resolve().parents[2]
-    if str(repo_root) not in sys.path:
-        sys.path.insert(0, str(repo_root))
     from tools.block_c import apply_crop_policy
 
     xyz_all = means.detach().float().cpu().numpy()
@@ -418,7 +426,7 @@ def main(argv: list[str] | None = None) -> int:
                 "n_outside": n_gauss - n_inside,
                 "crop": f"masks/{args.orbit}/gaussian_in_mask.npy",
                 "infill": "skipped",
-                "method": "gsplat means projected with trained splatfacto view matrices; vote threshold plus anchor ball",
+                "method": "gsplat means projected with trained splatfacto view matrices; Harvard eq.1 front-surface keep then vote threshold plus anchor ball",
                 "policy": chosen_name,
                 "ball": ball,
                 "span_inside": round(object_span, 6),

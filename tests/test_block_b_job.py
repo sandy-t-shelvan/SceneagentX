@@ -9,11 +9,17 @@ import numpy as np
 import pytest
 
 from tools.block_b_job import (
+    FRONT_ABS_SLACK,
+    FRONT_REL_SLACK,
     caption_from_spec,
     codebook_collapsed,
     detector_caption,
+    front_surface_keep,
+    front_surface_keep_mask,
+    front_surface_slack,
     grounding_prompt,
     host_launch_script,
+    mask_downstream_block_reason,
     require_object_name,
     union_target_mask,
     write_host_text,
@@ -217,17 +223,95 @@ def test_capture_record_uses_the_object_folder(tmp_path):
     assert "can" not in written["instance_count_note"]
 
 
-def test_can_launcher_uses_the_shared_job():
+def test_can_launcher_uses_the_shared_job_from_request_json(tmp_path, monkeypatch):
     path = repo_root() / "vast-cluster" / "scripts" / "launch_can_block_b_rerun.py"
     spec = importlib.util.spec_from_file_location("launch_can_block_b_rerun", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    text = module.START
+    monkeypatch.setattr(module, "ROOT", tmp_path)
+    folder = tmp_path / "data" / "can"
+    folder.mkdir(parents=True)
+    story = {
+        "prompt": "Here is the room. I want the can.",
+        "job": "room",
+        "target": "can",
+        "seen": ["can"],
+        "deliverable": "sisters_of_target",
+    }
+    (folder / "request.json").write_text(json.dumps(story), encoding="utf-8")
+    text = module.build_start(story)
     assert "pip install open_clip_torch" in text
     assert "STOP_AFTER_B2" in text
+    assert "STOP_AFTER_FIELD_REFUSE" in text
+    assert "MASK_RETRY_PENDING" in text
+    assert "ROOM_MASK_RETRY" in text
     assert '"$SA" -u vast-cluster/scripts/object_langsplat_b2.py --obj can' in text
     assert text.index("STOP_AFTER_B2") < text.index("object_langsplat_b3.py")
-    assert "aluminum soda can" in text
+    assert "PROMPT='can.'" in text
+    assert "cylindrical" not in text
+    assert module.load_can_spec()["target"] == "can"
+    (folder / "request.json").unlink()
+    with pytest.raises(SystemExit):
+        module.load_can_spec()
+
+
+def test_pending_or_stopped_mask_blocks_downstream(tmp_path):
+    folder = tmp_path / "data" / "can"
+    folder.mkdir(parents=True)
+    assert mask_downstream_block_reason(folder) is None
+    (folder / "mask_retry.json").write_text(
+        json.dumps({"detection": "pending", "params": {"box_threshold": 0.3}}),
+        encoding="utf-8",
+    )
+    assert "pending" in mask_downstream_block_reason(folder)
+    (folder / "mask_retry.json").write_text(
+        json.dumps({"detection": "rerun", "params": {"box_threshold": 0.3}}),
+        encoding="utf-8",
+    )
+    assert mask_downstream_block_reason(folder) is None
+    reviews = folder / "reviews"
+    reviews.mkdir()
+    (reviews / "target_mask_check.json").write_text(
+        json.dumps({"action": "stop", "reason": "second miss"}),
+        encoding="utf-8",
+    )
+    assert "stopped" in mask_downstream_block_reason(folder)
+    assert front_surface_keep(1.0, 1.0) is True
+    assert front_surface_keep(1.2, 1.0) is False
+    script = host_launch_script("lamp", [LAMP_ORBIT], spec={"job": "room", "target": "lamp", "prompt": "room", "seen": ["lamp"], "deliverable": "sisters_of_target"})
+    assert "STOP_AFTER_FIELD_REFUSE" in script
+    assert "field_failed=1" in script
+
+
+def test_front_surface_eq1_keeps_near_and_drops_far():
+    """Harvard eq.1: |z − z_front| ≤ εa + εr·|z_front|; far Gaussians drop."""
+    assert FRONT_ABS_SLACK == 0.08
+    assert FRONT_REL_SLACK == 0.03
+    front = 1.0
+    limit = front_surface_slack(front)
+    assert limit == pytest.approx(0.11)
+    assert front_surface_keep(front + 0.10, front) is True
+    assert front_surface_keep(front + 0.12, front) is False
+    assert front_surface_keep(front - 0.10, front) is True
+    assert front_surface_keep(5.0, front) is False
+    depth = np.array([1.0, 1.05, 1.10, 1.12, 5.0])
+    fronts = np.full(depth.shape, front)
+    kept = front_surface_keep_mask(depth, fronts)
+    assert kept.tolist() == [True, True, True, False, False]
+    # Same-pixel stack: only near-front samples survive (lift membership).
+    pixel_depth = np.array([2.0, 2.02, 8.0])
+    pixel_front = np.array([2.0, 2.0, 2.0])
+    pixel_kept = front_surface_keep_mask(pixel_depth, pixel_front)
+    assert pixel_kept.tolist() == [True, True, False]
+    assert not front_surface_keep_mask([float("nan")], [1.0])[0]
+
+
+def test_object_crop_iou_wires_harvard_eq1():
+    """Lift imports eq.1 slack; the old 1e-4 front tie is gone."""
+    text = (repo_root() / "vast-cluster" / "scripts" / "object_crop_iou.py").read_text(encoding="utf-8")
+    assert "from tools.block_b_job import FRONT_ABS_SLACK, FRONT_REL_SLACK" in text
+    assert "FRONT_ABS_SLACK + FRONT_REL_SLACK" in text
+    assert "depth[valid] <= nearest[flat] + 1e-4" not in text
 
 
 def test_autoencoder_last_layer_is_linear():

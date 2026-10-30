@@ -458,8 +458,7 @@ def test_first_room_sized_mask_is_not_cropped_and_a_smaller_retry_is(tmp_path: P
     assert held["crop"] == "refused"
     assert held["infill"] == "not_run"
     assert held["feature_field"] == "unstarted"
-    assert "9.78" in held["note"]
-    assert "20.44" in held["note"]
+    assert "pending" in held["note"]
     assert not (planted / "object.ply").exists()
     assert not list(folder.rglob("feature_field.json"))
     small = {"covers_room": False, "span_inside": 0.4, "span_scene": 10.0, "n_inside": 3, "n_outside": 1}
@@ -509,6 +508,22 @@ def test_still_room_sized_lift_stays_refused_after_the_retry(tmp_path: Path):
     assert "not repeated" in row["note"]
     assert not (folder / "objects" / "kitchen" / "orbit1" / "object.ply").exists()
     assert not (folder / "background" / "orbit1" / "background.ply").exists()
+
+
+def test_pending_mask_retry_refuses_crop_before_mesh(tmp_path: Path):
+    _write_pair(tmp_path, "kitchen", "orbit1")
+    folder = tmp_path / "data" / "kitchen"
+    _write_request(folder, "room", "Here is the room. I want the can.")
+    _write_lift(folder, "orbit1", {"covers_room": False, "span_inside": 0.4, "span_scene": 10.0, "n_inside": 3, "n_outside": 1})
+    (folder / "mask_retry.json").write_text(
+        json.dumps({"detection": "pending", "orbits": ["orbit1"], "params": {"box_threshold": 0.3}, "retrain": False}),
+        encoding="utf-8",
+    )
+    assert crop_decision(folder, {"covers_room": False, "span_inside": 0.4, "span_scene": 10.0}, 1) == "refused"
+    row = run_c1("kitchen", "orbit1", tmp_path)
+    assert row["crop"] == "refused"
+    assert "pending" in row["note"]
+    assert not (folder / "objects" / "kitchen" / "orbit1" / "object.ply").exists()
 
 
 def test_object_removed_spec_still_requires_infill(tmp_path: Path):

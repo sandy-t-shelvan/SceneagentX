@@ -292,9 +292,10 @@ def test_fresh_without_a_host_does_not_delete_colmap(tmp_path: Path, monkeypatch
 def test_run_step_uses_the_prompt_phrase(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     launched: dict[str, str] = {}
 
-    def fake_launch(_obj, _pairs, prompt=None, log_stem=None) -> str:
+    def fake_launch(_obj, _pairs, prompt=None, log_stem=None, spec=None) -> str:
         del log_stem
-        launched["prompt"] = str(prompt)
+        launched["prompt"] = prompt
+        launched["spec"] = spec
         return "echo STARTED 9\n"
 
     host = VastHost(instance_id=1, status="running", host="203.0.113.10", port=2222)
@@ -308,4 +309,23 @@ def test_run_step_uses_the_prompt_phrase(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.setattr("tools.agent_loop._ssh", lambda _host, _script, timeout=90: (0, "STARTED 9\n", ""))
     assert _skill_run_step("can", tmp_path, PHRASE) == 0
     assert launched["prompt"] == PHRASE
+    assert launched["spec"] is None
     assert launched["prompt"] != CAN_CAPTION
+
+    story = {
+        "prompt": PROMPT,
+        "job": "orbit",
+        "target": "can",
+        "seen": ["can"],
+        "deliverable": "sisters_of_target",
+    }
+    folder = tmp_path / "data" / "can"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "request.json").write_text(json.dumps(story), encoding="utf-8")
+    launched.clear()
+    assert _skill_run_step("can", tmp_path, CAN_CAPTION) == 0
+    assert launched["spec"] == story
+    assert launched["prompt"] is None
+
+    (folder / "mask_retry.json").write_text(json.dumps({"detection": "pending"}), encoding="utf-8")
+    assert _skill_run_step("can", tmp_path, PHRASE) == 2

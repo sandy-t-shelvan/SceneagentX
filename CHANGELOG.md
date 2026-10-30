@@ -3,6 +3,22 @@
 ## [Unreleased]
 
 ### Added
+- tools/metric_depth.py: metric scale from Depth Anything / FoundationStereo / Polycam / ruler / tag36h11; refuses VLM model_knowledge as metres_per_unit; missing weights stay null ScoreOnly
+- tests/test_metric_depth.py: mocked depth pairs write finite metres_per_unit, missing weights leave null and unachieved, VLM method refused
+- tools/metric_depth.py: predict_metric_depth runs Depth Anything 3 when weights+package are ready; recovers metres_per_unit from metric/COLMAP depth pairs; missing frames/transforms stamp not_measured
+- tests/test_metric_depth.py: mocked predictor writes finite scale; missing frames/transforms with a ready backend stamp null metres_per_unit
+
+### Fixed
+- tools/metric_depth.py: DA3METRIC-LARGE uses official focal_px * depth / 300 conversion when Prediction.is_metric stays unset (package addict quirk); relative checkpoints still refuse
+- tests/test_metric_depth.py: metric focal/300 path vs non-metric refusal and missing-intrinsics refusal for DA3METRIC
+- tools/gate_policy.py: HardStop / RepairLoop / ScoreOnly classification, skill exit codes, and a ledger that never sets milestones true
+- tests/test_gate_policy.py: skip and package exit 0 as ScoreOnly, missing metres continues, second room refuse stays HardStop, and bypass still never achieves
+- tools/block_b_job.py: mask_downstream_block_reason blocks crop and feature field while a room-mask retry is pending or stopped, front_surface_keep stubs Harvard eq.1, and the host job records one room-mask retry then stops before B4
+- tools/block_b_job.py: front_surface_slack and front_surface_keep_mask apply Harvard eq.1 (εa=0.08, εr=0.03) so far Gaussians drop
+- tests/test_block_b_job.py: can Block B starts from request.json, pending or stopped masks block downstream, and field refusal stops before B4
+- tests/test_block_b_job.py: eq.1 keeps near-front depths and drops far same-pixel Gaussians, and object_crop_iou imports the Harvard slack
+- tests/test_task_spec.py: a missing target overlay stops with asked false and does not pass
+- tests/test_block_c.py: a pending mask retry refuses the crop before mesh
 - tests/test_block_h_prompt.py: --prompt stores the user's text before Block H skills, and --fresh rebuilds even when a checkpoint is present
 - tools/gate_bypass.py: SCENEAGENT_BYPASS_GATES, default off, records a bypassed check as skipped or unmet and leaves achieved, m1_met, m2_met, and milestone false
 - tests/test_gate_bypass.py: the Block H walk stops on the first failed skill by default, and with the switch on it continues without marking achieved
@@ -21,6 +37,17 @@
 - tests/test_object_block_b_report.py: a physics-vector npz is not a LangSplat codebook, and the written score keeps miou null
 
 ### Changed
+- tools/agent_loop.py: SCENEAGENT-INGEST-DATA recovers metric scale after COLMAP/splat (or when checkpoints are kept); missing depth stays not_measured
+- tools/orbit_blocks.py: _keep_unmeasured_scale tries metric_depth recover before writing not_measured
+- tools/design_workspace.py: _write_scale uses metric_depth recover instead of always stamping not_measured
+- tools/import_polycam.py: LiDAR/COLMAP stamps polycam metres_per_unit=1.0; --scale writes measured scale.json
+- vast-cluster/scripts/object_crop_iou.py: membership lift keeps only Gaussians near the front surface via Harvard eq.1 (εa=0.08, εr=0.03) instead of a 1e-4 depth tie
+- tools/agent_loop.py: _skill_skip and _skill_package return ScoreOnly exit 0 with a ledger stamp; missing metres on align continues; the walk stops only on HardStop
+- tools/block_gates.py: measure pass means skill finished with stamps; missing metres, mass, and Chamfer/F1 stay achieved false without blocking iterate
+- tools/orbit_chain.py: Block F keeps metres_per_unit missing as a ScoreOnly reason, not a Block H walk killer
+- tools/agent_loop.py: SCENEAGENT-RUN-STEP launches Block B from request.json when present and refuses a pending room-mask retry
+- tools/block_c.py: crop_decision refuses while mask_retry is pending or the target mask check stopped
+- tools/task_spec.py: a missing review PNG on gate_detected_target writes asked false and does not pass
 - tools/agent_loop.py: --orchestrate --prompt stores the user text before any skill, and --fresh rebuilds COLMAP and splatfacto without deleting outputs or raw video
 - tools/agent_loop.py: --orchestrate walks Block H from SCENEAGENT-RUN-PIPELINE, and --bypass-gates lets the next skill run after an unmet check
 - tools/pipeline.py: a failed block or an unimplemented block stops the run unless SCENEAGENT_BYPASS_GATES is on

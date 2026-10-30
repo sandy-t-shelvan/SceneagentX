@@ -444,29 +444,39 @@ def _colour(folder: Path) -> dict[str, Any]:
 
 
 def _keep_unmeasured_scale(folder: Path) -> None:
+    """Prefer tag / metric depth / polycam / ruler; never invent VLM metres."""
+    from tools.metric_depth import is_measured_record, recover_metric_scale
+
     path = folder / "ingest" / "scale.json"
     existing = _read(path)
-    tag = _read(folder / "ingest" / "tag_measurement.json")
-    if existing.get("method") not in (None, "", "not_measured") and _finite(existing.get("metres_per_unit")) is not None:
+    if is_measured_record(existing):
         return
-    if _finite(tag.get("metres_per_unit")) is not None:
-        _dump(
-            path,
-            {
-                "metres_per_unit": tag["metres_per_unit"],
-                "method": str(tag.get("method") or "tag"),
-                "reason": "A tag measurement was already recorded.",
-            },
-        )
+    obj = folder.name
+    root = folder.parent.parent if folder.parent.name == "data" else folder.parent
+    # recover_metric_scale resolves tag → depth probe → not_measured ScoreOnly.
+    try:
+        record = recover_metric_scale(obj, root, orbit=1)
+    except Exception:
+        record = {}
+    if is_measured_record(record):
+        return
+    if record:
+        # recover already wrote scale.json; keep capture notes for bottle reports.
+        saved = _read(path)
+        if saved.get("method") == "not_measured":
+            saved.setdefault("capture", BOTTLE_ORBITS[0])
+            saved.setdefault("existing_capture", True)
+            _dump(path, saved)
         return
     _dump(
         path,
         {
             "metres_per_unit": None,
             "method": "not_measured",
-            "reason": "No AprilTag board or known length was recorded for this object.",
+            "reason": "No AprilTag board, metric depth, or known length was recorded for this object.",
             "capture": BOTTLE_ORBITS[0],
             "existing_capture": True,
+            "achieved": False,
         },
     )
 

@@ -289,6 +289,37 @@ def test_segmentation_refuses_to_start_without_a_spec(tmp_path: Path):
     assert called == []
 
 
+def test_missing_overlay_is_asked_false_not_a_pass(tmp_path: Path):
+    folder = tmp_path / "data" / "kitchen"
+    folder.mkdir(parents=True)
+    (folder / "request.json").write_text(
+        json.dumps(
+            {
+                "prompt": "Here is the room. I want the can.",
+                "job": "room",
+                "target": "can",
+                "seen": ["can"],
+                "deliverable": "sisters_of_target",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def segment(_target, _params):
+        return {"view_fractions": [0.2], "covers_room": False, "mask_pixels": 10}
+
+    result = run_target_mask_check(folder, segment)
+    assert result["action"] == "stop"
+    assert result["asked"] is False
+    assert result["reason"] == "no target overlay"
+    assert result["retrain"] is False
+    assert result["sisters"] is False
+    saved = json.loads((folder / "reviews" / "target_mask_check.json").read_text(encoding="utf-8"))
+    assert saved["asked"] is False
+    assert saved["action"] == "stop"
+    assert saved["reason"] == "no target overlay"
+
+
 def test_gpu_scripts_do_not_parse_the_sentence():
     root = repo_root()
     semantics = (root / "vast-cluster" / "scripts" / "object_semantics.py").read_text(encoding="utf-8")

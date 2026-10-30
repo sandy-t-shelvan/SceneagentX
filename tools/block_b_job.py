@@ -178,6 +178,97 @@ def feature_field_may_start(
     return True
 
 
+def mask_downstream_block_reason(folder: Path) -> str | None:
+    """Why crop, feature field, mesh, or sisters must not start from this mask.
+
+    A pending mask_retry.json means the one tighter detection has not run yet.
+    A stopped target_mask_check means the room-sized lift stayed refused.
+    None means those gates do not block; room-span and frame-cover checks stay
+    with feature_field_may_start and crop_decision.
+    """
+    folder = Path(folder)
+    retry = _read_json(folder / "mask_retry.json")
+    if isinstance(retry, dict) and retry.get("detection") == "pending":
+        return "mask retry is pending; crop and feature field were not started"
+    check = _read_json(folder / "reviews" / "target_mask_check.json")
+    if isinstance(check, dict) and check.get("action") == "stop":
+        return "target mask check stopped; crop and feature field were not started"
+    return None
+
+
+def _read_json(path: Path) -> dict | None:
+    if not path.is_file():
+        return None
+    try:
+        import json
+
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+# Harvard SceneAgent eq.1 front-surface slack (reconstruction units).
+# Wired into vast-cluster/scripts/object_crop_iou.py membership lift.
+FRONT_ABS_SLACK = 0.08
+FRONT_REL_SLACK = 0.03
+
+
+def front_surface_slack(
+    front_depth: float,
+    *,
+    abs_slack: float = FRONT_ABS_SLACK,
+    rel_slack: float = FRONT_REL_SLACK,
+) -> float:
+    """εa + εr·|front| from paper eq.1."""
+    return float(abs_slack) + float(rel_slack) * abs(float(front_depth))
+
+
+def front_surface_keep(
+    depth: float,
+    front_depth: float,
+    *,
+    abs_slack: float = FRONT_ABS_SLACK,
+    rel_slack: float = FRONT_REL_SLACK,
+) -> bool:
+    """True when a projected Gaussian lies near the front surface (paper eq.1).
+
+    Absolute slack 0.08 and relative slack 0.03. The lift applies the same
+    limit per projected Gaussian so far Gaussians behind the front surface drop.
+    """
+    try:
+        depth_f = float(depth)
+        front_f = float(front_depth)
+    except (TypeError, ValueError):
+        return False
+    if not (depth_f == depth_f and front_f == front_f):
+        return False
+    return abs(depth_f - front_f) <= front_surface_slack(
+        front_f, abs_slack=abs_slack, rel_slack=rel_slack
+    )
+
+
+def front_surface_keep_mask(
+    depth,
+    front_depth,
+    *,
+    abs_slack: float = FRONT_ABS_SLACK,
+    rel_slack: float = FRONT_REL_SLACK,
+) -> np.ndarray:
+    """Boolean mask for Harvard eq.1 over parallel depth / front-depth arrays.
+
+    Far Gaussians (beyond εa + εr·|front|) are False. NaN inputs are False.
+    """
+    depth_a = np.asarray(depth, dtype=np.float64)
+    front_a = np.asarray(front_depth, dtype=np.float64)
+    if depth_a.shape != front_a.shape:
+        raise ValueError(f"depth shape {depth_a.shape} != front_depth shape {front_a.shape}")
+    limit = float(abs_slack) + float(rel_slack) * np.abs(front_a)
+    with np.errstate(invalid="ignore"):
+        kept = np.abs(depth_a - front_a) <= limit
+    return np.asarray(kept, dtype=bool) & np.isfinite(depth_a) & np.isfinite(front_a)
+
+
 def codebook_collapsed(max_abs: float, ae_loss: float) -> bool:
     """True when the autoencoder wrote a zero latent or stopped learning."""
     return float(max_abs) == 0.0 or float(ae_loss) >= 0.99
@@ -246,7 +337,19 @@ def host_launch_script(
         raise ValueError(f"refusing log name {log_stem}")
     root_path = str(root).rstrip("/")
     pairs = [(_orbit_name(orbit), _config_path(config)) for orbit, config in orbits]
-    job = _job_body(name, pairs, caption, root_path, skip_flag, target, box_threshold)
+    task_job = None
+    if isinstance(spec, dict) and spec.get("job") in {"orbit", "room"}:
+        task_job = str(spec["job"])
+    job = _job_body(
+        name,
+        pairs,
+        caption,
+        root_path,
+        skip_flag,
+        target,
+        box_threshold,
+        task_job=task_job,
+    )
     script_path = f"/root/logs/{stem}.sh"
     pid_path = f"/root/logs/{stem}.pid"
     log_path = f"/root/logs/{stem}.log"
@@ -282,6 +385,7 @@ def _job_body(
     skip_flag: str | None,
     target: str | None = None,
     box_threshold: float | None = None,
+    task_job: str | None = None,
 ) -> str:
     quoted_prompt = shell_quote(caption)
     detect = f'"$GSAM" -u vast-cluster/scripts/object_semantics.py --obj {name} --prompt "$PROMPT"'
@@ -349,6 +453,13 @@ def _job_body(
                 "fi",
             ]
         )
+        field_stop = "\n".join(
+            [
+                'if [ "$field_failed" -ne 0 ]; then',
+                '  mark "B4_UNMET field_refused"',
+                "fi",
+            ]
+        )
     else:
         b2_stop = "\n".join(
             [
@@ -358,6 +469,47 @@ def _job_body(
                 "fi",
             ]
         )
+        field_stop = "\n".join(
+            [
+                'if [ "$field_failed" -ne 0 ]; then',
+                "  mark STOP_AFTER_FIELD_REFUSE",
+                "  exit 2",
+                "fi",
+            ]
+        )
+    pending_gate = "\n".join(
+        [
+            '"$NERF" - << \'PY\'',
+            "import json",
+            "from pathlib import Path",
+            f'folder = Path("{root}/data/{name}")',
+            'retry_path = folder / "mask_retry.json"',
+            "if retry_path.is_file():",
+            "    try:",
+            '        retry = json.loads(retry_path.read_text(encoding="utf-8"))',
+            "    except (OSError, json.JSONDecodeError):",
+            "        retry = {}",
+            '    if isinstance(retry, dict) and retry.get("detection") == "pending":',
+            '        print("MASK_RETRY_PENDING; crop and feature field were not started", flush=True)',
+            "        raise SystemExit(2)",
+            'check_path = folder / "reviews" / "target_mask_check.json"',
+            "if check_path.is_file():",
+            "    try:",
+            '        check = json.loads(check_path.read_text(encoding="utf-8"))',
+            "    except (OSError, json.JSONDecodeError):",
+            "        check = {}",
+            '    if isinstance(check, dict) and check.get("action") == "stop":',
+            '        print("TARGET_MASK_STOPPED; crop and feature field were not started", flush=True)',
+            "        raise SystemExit(2)",
+            "PY",
+            "gate_rc=$?",
+            'mark "MASK_DOWNSTREAM_GATE_EXIT $gate_rc"',
+            'if [ "$gate_rc" -ne 0 ]; then',
+            "  mark STOP_MASK_DOWNSTREAM",
+            '  exit "$gate_rc"',
+            "fi",
+        ]
+    )
     lines = [
         "set -u",
         "export MAMBA_ROOT_PREFIX=/root/.local/share/mamba",
@@ -370,7 +522,9 @@ def _job_body(
         'SA="$MAMBA_ROOT_PREFIX/envs/sa/bin/python"',
         f"PROMPT={quoted_prompt}",
         *([f"TARGET={shell_quote(target)}"] if target else []),
+        *([f"TASK_JOB={shell_quote(task_job)}"] if task_job else []),
         'mark() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*"; }',
+        "field_failed=0",
         "",
         f'DEST="$ROOT/data/{name}/ingest/block_b_first"',
         'if [ ! -f "$DEST/KEEP" ]; then',
@@ -407,6 +561,9 @@ def _job_body(
         "fi",
         '"$SA" -c "import open_clip" || { echo open_clip_missing; exit 2; }',
         "",
+        "mark MASK_DOWNSTREAM_GATE",
+        pending_gate,
+        "",
         b1,
         "",
         "mark B2",
@@ -422,11 +579,94 @@ def _job_body(
         f'  "$NERF" -u vast-cluster/scripts/object_crop_iou.py --obj {name} --prompt "$PROMPT" --orbit "$orbit" --config "$cfg" --root "$ROOT"',
         '  mark "PROJECT_EXIT $orbit $?"',
         '  mark "FIELD $orbit"',
-        f'  "$NERF" -u vast-cluster/scripts/object_langsplat_b3.py --obj {name} --root "$ROOT" --orbit "$orbit"',
-        '  mark "FIELD_EXIT $orbit $?"',
+        f'  if "$NERF" -u vast-cluster/scripts/object_langsplat_b3.py --obj {name} --root "$ROOT" --orbit "$orbit"; then',
+        '    mark "FIELD_EXIT $orbit 0"',
+        "  else",
+        '    mark "FIELD_EXIT $orbit $?"',
+        "    field_failed=1",
+        "  fi",
         "}",
         "",
         *projects,
+        "",
+        "# After lifts exist, record the one room-mask box_threshold retry for the laptop.",
+        '"$NERF" - << \'PY\'',
+        "import json",
+        "from pathlib import Path",
+        f'folder = Path("{root}/data/{name}")',
+        "spec = {}",
+        'spec_path = folder / "request.json"',
+        "if spec_path.is_file():",
+        "    try:",
+        '        spec = json.loads(spec_path.read_text(encoding="utf-8"))',
+        "    except (OSError, json.JSONDecodeError):",
+        "        spec = {}",
+        'if not isinstance(spec, dict) or spec.get("job") != "room":',
+        '    print("ROOM_MASK_RETRY skip", flush=True)',
+        "    raise SystemExit(0)",
+        "failing = []",
+        'masks = folder / "masks"',
+        "if masks.is_dir():",
+        "    for child in sorted(p for p in masks.iterdir() if p.is_dir()):",
+        '        obj_path = child / "object.json"',
+        "        if not obj_path.is_file():",
+        "            continue",
+        "        try:",
+        '            lift = json.loads(obj_path.read_text(encoding="utf-8"))',
+        "        except (OSError, json.JSONDecodeError):",
+        "            continue",
+        "        if not isinstance(lift, dict):",
+        "            continue",
+        '        span_in, span_sc = lift.get("span_inside"), lift.get("span_scene")',
+        "        ratio = None",
+        "        if isinstance(span_in, (int, float)) and isinstance(span_sc, (int, float)) and not isinstance(span_in, bool) and not isinstance(span_sc, bool) and float(span_sc) > 0:",
+        "            ratio = float(span_in) / float(span_sc)",
+        '        covers = lift.get("covers_room") is True or (ratio is not None and ratio >= 0.5)',
+        "        if not covers:",
+        "            continue",
+        '        failing.append({"orbit": child.name, "covers_room": lift.get("covers_room") is True, "span_inside": span_in, "span_scene": span_sc, "span_ratio": ratio})',
+        "if not failing:",
+        '    print("ROOM_MASK_RETRY ok", flush=True)',
+        "    raise SystemExit(0)",
+        'retry_path = folder / "mask_retry.json"',
+        "existing = {}",
+        "if retry_path.is_file():",
+        "    try:",
+        '        existing = json.loads(retry_path.read_text(encoding="utf-8"))',
+        "    except (OSError, json.JSONDecodeError):",
+        "        existing = {}",
+        'if isinstance(existing, dict) and existing.get("detection") == "rerun":',
+        '    print("ROOM_MASK_RETRY stop second miss", flush=True)',
+        "    raise SystemExit(2)",
+        'if isinstance(existing, dict) and existing.get("detection") == "pending":',
+        '    print("ROOM_MASK_RETRY pending", flush=True)',
+        "    raise SystemExit(2)",
+        'target = spec.get("target") if isinstance(spec.get("target"), str) else ""',
+        "payload = {",
+        '    "target": target.strip(),',
+        '    "params": {"box_threshold": 0.30},',
+        '    "retrain": False,',
+        '    "sisters": False,',
+        '    "splat_retrained": False,',
+        '    "orbits": [row["orbit"] for row in failing],',
+        '    "measured": failing,',
+        '    "reason": "lift covers the room",',
+        '    "detection": "pending",',
+        '    "attempts": 1,',
+        '    "feature_field": "not_started",',
+        "}",
+        "retry_path.parent.mkdir(parents=True, exist_ok=True)",
+        'retry_path.write_text(json.dumps(payload, indent=2) + "\\n", encoding="utf-8")',
+        'print("ROOM_MASK_RETRY wrote", [row["orbit"] for row in failing], flush=True)',
+        "raise SystemExit(2)",
+        "PY",
+        "room_rc=$?",
+        'mark "ROOM_MASK_RETRY_EXIT $room_rc"',
+        'if [ "$room_rc" -ne 0 ]; then',
+        "  field_failed=1",
+        "fi",
+        "",
+        field_stop,
         "",
         *clusters,
         '"$NERF" - << \'PY\'',

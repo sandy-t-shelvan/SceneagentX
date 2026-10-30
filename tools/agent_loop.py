@@ -504,11 +504,12 @@ def run_block_h(
     """Walk the Block H skills, starting with SCENEAGENT-RUN-PIPELINE.
 
     A prompt is stored before the first skill. The detector caption is one
-    phrase from that prompt. With the bypass switch off, the first failed
-    skill stops the walk. With it on, the unmet check is recorded and the
-    next skill runs. This does not mark a milestone achieved.
+    phrase from that prompt. ScoreOnly exits continue without
+    SCENEAGENT_BYPASS_GATES. HardStop ends the walk. Bypass still continues
+    other unmet checks without marking a milestone achieved.
     """
     from tools.gate_bypass import continue_past
+    from tools.gate_policy import classify_skill_result, record_ledger, walk_continues
 
     caption = CAN_CAPTION
     video_names = [str(path) for path in videos] if videos else None
@@ -572,7 +573,20 @@ def run_block_h(
         walked.append({"skill": skill_id, "code": code, "detail": detail, "achieved": False, "m1_met": False, "m2_met": False})
         sys.stdout.write(f"{skill_id} exit {code}\n")
         if code != 0:
-            if continue_past(obj, root, skill_id, detail or f"{skill_id} exited {code}", check="unmet"):
+            note = detail or f"{skill_id} exited {code}"
+            gate_class = classify_skill_result(skill_id, code, note)
+            if walk_continues(gate_class):
+                record_ledger(
+                    obj,
+                    root,
+                    gate=skill_id,
+                    gate_class=gate_class,
+                    detail=note,
+                    check="unmet",
+                    reason="score_only_continue",
+                )
+                continue
+            if continue_past(obj, root, skill_id, note, check="unmet"):
                 continue
             ask_question(
                 obj,
@@ -605,17 +619,29 @@ def _default_skills(
         ("SCENEAGENT-INGEST-DATA", lambda: _skill_ingest(obj, root, rebuild=fresh)),
         ("SCENEAGENT-RUN-STEP", lambda: _skill_run_step(obj, root, caption)),
         ("SCENEAGENT-ALIGN-SCENE", lambda: _skill_align(obj, root)),
-        ("SCENEAGENT-ORIENT-BACKGROUND", lambda: _skill_skip("orient")),
+        ("SCENEAGENT-ORIENT-BACKGROUND", lambda: _skill_skip("orient", obj, root)),
         ("SCENEAGENT-PACKAGE-DATA-PROCESSED", lambda: _skill_package(obj, root)),
-        ("SCENEAGENT-INSPECT-ISAAC", lambda: _skill_skip("inspect; sim.reset was not called")),
-        ("SCENEAGENT-OBJECT-SISTERS", lambda: _skill_skip("object sisters")),
-        ("SCENEAGENT-SCENE-SISTERS", lambda: _skill_skip("scene sisters")),
+        ("SCENEAGENT-INSPECT-ISAAC", lambda: _skill_skip("inspect; sim.reset was not called", obj, root)),
+        ("SCENEAGENT-OBJECT-SISTERS", lambda: _skill_skip("object sisters", obj, root)),
+        ("SCENEAGENT-SCENE-SISTERS", lambda: _skill_skip("scene sisters", obj, root)),
     ]
 
 
-def _skill_skip(reason: str) -> int:
+def _skill_skip(reason: str, obj: str | None = None, root: Path | None = None) -> int:
+    """ScoreOnly: ledger skipped, exit 0. A skip is not a pass."""
+    from tools.gate_policy import SCORE_ONLY, record_ledger, skill_exit
+
+    record_ledger(
+        obj,
+        root,
+        gate="skill_skip",
+        gate_class=SCORE_ONLY,
+        detail=reason,
+        check="skipped",
+        reason="skill_skip",
+    )
     sys.stdout.write(f"skipped {reason}; a skip is not a pass\n")
-    return 2
+    return skill_exit(SCORE_ONLY)
 
 
 def _skill_run_pipeline(obj: str, root: Path | None, caption: str = CAN_CAPTION) -> int:
@@ -716,6 +742,7 @@ def _skill_ingest(obj: str, root: Path | None, *, rebuild: bool = False) -> int:
         missing = [orbit for orbit in orbits if _colmap_missing(obj, root, orbit) or _splat_missing(obj, root, orbit)]
         if not missing:
             sys.stdout.write("ingest kept existing COLMAP and splat checkpoints\n")
+            _recover_ingest_scale(obj, root)
             return 0
     host = running_vast_host()
     if host is None:
@@ -758,7 +785,27 @@ def _skill_ingest(obj: str, root: Path | None, *, rebuild: bool = False) -> int:
                     failed = True
                     continue
                 return code
+    _recover_ingest_scale(obj, root)
     return 1 if failed else 0
+
+
+def _recover_ingest_scale(obj: str, root: Path | None) -> None:
+    """After COLMAP/splat, try metric depth (or keep tag/polycam/ruler). Never VLM metres."""
+    from tools.metric_depth import is_measured_record, recover_metric_scale
+
+    try:
+        record = recover_metric_scale(obj, root, orbit=1)
+    except Exception as exc:  # noqa: BLE001 — ingest continues ScoreOnly on scale miss
+        sys.stderr.write(f"metric scale recover failed: {exc}\n")
+        return
+    if is_measured_record(record):
+        sys.stdout.write(
+            f"ingest scale method={record.get('method')} metres_per_unit={record.get('metres_per_unit')}\n"
+        )
+    else:
+        sys.stdout.write(
+            f"ingest scale not_measured ({record.get('status')}); metres_per_unit null; achieved false\n"
+        )
 
 
 def _colmap_missing(obj: str, root: Path | None, orbit: int) -> bool:
@@ -797,7 +844,7 @@ def _splat_missing(obj: str, root: Path | None, orbit: int) -> bool:
 
 
 def _skill_run_step(obj: str, root: Path | None, caption: str = CAN_CAPTION) -> int:
-    """Launch Block B on the live Vast host with one detector phrase."""
+    """Launch Block B on the live Vast host from the stored request story."""
     from tools.pipeline import running_vast_host
 
     host = running_vast_host()
@@ -808,9 +855,19 @@ def _skill_run_step(obj: str, root: Path | None, caption: str = CAN_CAPTION) -> 
     if not pairs:
         sys.stderr.write("no splat config; Block B was not started and the splat was not retrained\n")
         return 2
-    from tools.block_b_job import host_launch_script
+    from tools.block_b_job import host_launch_script, mask_downstream_block_reason
+    from tools.common.paths import object_dir
 
-    script = host_launch_script(obj, pairs, prompt=caption, log_stem=f"{obj}_block_h")
+    folder = object_dir(obj, root)
+    blocked = mask_downstream_block_reason(folder)
+    if blocked:
+        sys.stderr.write(blocked + "\n")
+        return 2
+    spec = _load_task_spec(folder)
+    if spec is not None:
+        script = host_launch_script(obj, pairs, spec=spec, log_stem=f"{obj}_block_h")
+    else:
+        script = host_launch_script(obj, pairs, prompt=caption, log_stem=f"{obj}_block_h")
     copied = _sync_host_code(host)
     if copied != 0:
         return copied
@@ -822,6 +879,25 @@ def _skill_run_step(obj: str, root: Path | None, caption: str = CAN_CAPTION) -> 
     if code != 0 and "ALREADY_RUNNING" not in out:
         return code if code != 0 else 2
     return 0
+
+
+def _load_task_spec(folder: Path) -> dict[str, Any] | None:
+    """request.json with job and target. A synonym-only caption is not a story."""
+    path = Path(folder) / "request.json"
+    if not path.is_file():
+        return None
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(loaded, dict):
+        return None
+    if loaded.get("job") not in {"orbit", "room"}:
+        return None
+    target = loaded.get("target")
+    if not isinstance(target, str) or not target.strip():
+        return None
+    return loaded
 
 
 def _splat_configs(obj: str, root: Path | None, host) -> list[tuple[str, str]]:
@@ -1007,20 +1083,55 @@ def _remember_gpu(obj: str, host, out: str, err: str, code: int) -> None:
 
 
 def _skill_align(obj: str, root: Path | None) -> int:
+    """Align when possible. Missing metres/tag is ScoreOnly and does not kill the walk."""
     from tools.align import run_align
+    from tools.gate_policy import SCORE_ONLY, record_ledger, skill_exit
 
-    return run_align(obj, root, rerun_orbits=False)
+    code = run_align(obj, root, rerun_orbits=False)
+    if code == 0:
+        return 0
+    record_ledger(
+        obj,
+        root,
+        gate="SCENEAGENT-ALIGN-SCENE",
+        gate_class=SCORE_ONLY,
+        detail="metres_per_unit missing or alignment unmet; scale stays unmeasured",
+        check="unmet",
+        reason="no_metres",
+    )
+    sys.stdout.write("align unmet; metres_per_unit stays null; not marked achieved\n")
+    return skill_exit(SCORE_ONLY)
 
 
 def _skill_package(obj: str, root: Path | None) -> int:
+    """ScoreOnly: USDZ present exits 0 as present_unachieved; missing is not invented."""
     from tools.common.paths import object_dir
+    from tools.gate_policy import SCORE_ONLY, record_ledger, skill_exit
 
     folder = object_dir(obj, root)
     if (folder / "scene.usdz").is_file() or (folder / "asset.usdz").is_file():
+        record_ledger(
+            obj,
+            root,
+            gate="SCENEAGENT-PACKAGE-DATA-PROCESSED",
+            gate_class=SCORE_ONLY,
+            detail="package file present; not marked achieved",
+            check="present_unachieved",
+            reason="package_present",
+        )
         sys.stdout.write("package file present; not marked achieved\n")
-        return 2
+        return skill_exit(SCORE_ONLY)
+    record_ledger(
+        obj,
+        root,
+        gate="SCENEAGENT-PACKAGE-DATA-PROCESSED",
+        gate_class=SCORE_ONLY,
+        detail="package missing; not invented",
+        check="skipped",
+        reason="package_missing",
+    )
     sys.stdout.write("package missing; not invented\n")
-    return 2
+    return skill_exit(SCORE_ONLY)
 
 
 def _write_block_h(

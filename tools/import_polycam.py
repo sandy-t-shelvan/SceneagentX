@@ -322,6 +322,37 @@ def import_polycam_lidar(scan_dir: Path, obj: str, orbit: int, root: Path | None
     }
 
 
+def _stamp_polycam_scale(
+    obj: str,
+    root: Path | None,
+    fmt: str,
+    manual_scale: float | None,
+) -> None:
+    """Write ingest/scale.json from Polycam/ARKit metres or an explicit --scale.
+
+    LiDAR / metric COLMAP exports are metres (metres_per_unit=1.0). An explicit
+    --scale matches align.py --manual-scale (stored as metres_per_unit). Never VLM.
+    """
+    from tools.metric_depth import measured_record, unmeasured_record, write_scale_json
+
+    if manual_scale is not None:
+        method = "ruler" if fmt == "polycam_photo" else "polycam"
+        write_scale_json(obj, measured_record(float(manual_scale), method, extra={"format": fmt}), root)
+        return
+    if fmt in {"polycam_lidar", "colmap"}:
+        write_scale_json(obj, measured_record(1.0, "polycam", extra={"format": fmt}), root)
+        return
+    write_scale_json(
+        obj,
+        unmeasured_record(
+            reason="Polycam photo export has no metric poses; pass --scale or run metric depth",
+            attempted="polycam",
+            status="not_run",
+        ),
+        root,
+    )
+
+
 def import_polycam_scan(
     scan_dir: Path,
     obj: str,
@@ -353,6 +384,7 @@ def import_polycam_scan(
             set_path(doc, "ground_truth.scale_from_polycam", manual_scale)
         
         save_status(obj, doc, root)
+        _stamp_polycam_scale(obj, root, fmt, manual_scale)
         
         finish_step(obj, "B2_polycam", "pass", root, actual=result)
         
