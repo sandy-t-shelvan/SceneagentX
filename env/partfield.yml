@@ -1,0 +1,12 @@
+# B9 parts. Torch is enough for the B0 CUDA check.
+# Before B9, clone https://github.com/nv-tlabs/PartField into third_party/PartField
+# and download the PartField checkpoint the upstream README names.
+name: partfield
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu121
+      - torch==2.1.2+cu121

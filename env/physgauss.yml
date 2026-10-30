@@ -1,0 +1,12 @@
+# B11 articulation and B15 deformable. Torch is enough for the B0 CUDA check.
+# Before those blocks, clone https://github.com/XPandora/PhysGaussian into third_party/PhysGaussian.
+# Genesis is the simulator the plan uses for the URDF rest and pull tests.
+name: physgauss
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu121
+      - torch==2.1.2+cu121

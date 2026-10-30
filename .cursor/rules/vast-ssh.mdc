@@ -1,0 +1,14 @@
+---
+description: Look up the live Vast GPU over the CLI before every SSH or install
+alwaysApply: true
+---
+
+# Vast GPU
+
+Code stays on the laptop. GPU installs and GPU programs run on the rented Vast machine.
+
+Before every SSH, scp, or remote install, run `vastai show instances` and use the instance that is actually running. Do not reuse an IP address or port from an earlier session. Instances are replaced, and the old host will refuse the connection.
+
+The SSH private key on this laptop is `%USERPROFILE%\.ssh\ssh_sceneagentX_1`. Connect as `root` to the public IP and direct port from the CLI. Do not store the Vast API key, an OpenAI key, or that private key in the repo.
+
+Do not rent a second machine unless the user asks. `vast-cluster/scripts/search_offer.py` only prints a create command.

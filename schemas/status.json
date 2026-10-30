@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneagentx.local/schemas/status.json",
+  "title": "SceneAgent reproduction status",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema_version", "object", "ground_truth", "steps"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "object": {"type": "string", "minLength": 1},
+    "ground_truth": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["length_m"],
+      "properties": {
+        "length_m": {"type": ["number", "null"]}
+      }
+    },
+    "setup_minutes": {"type": ["number", "null"], "minimum": 0},
+    "gpu_minutes": {"type": ["number", "null"], "minimum": 0},
+    "steps": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/step"}
+    }
+  },
+  "$defs": {
+    "step": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "name", "state", "attempts"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^B([0-9]|1[0-7])$"},
+        "name": {"type": "string", "minLength": 1},
+        "state": {"enum": ["not_started", "running", "pass", "fail"]},
+        "attempts": {"type": "integer", "minimum": 0},
+        "actual": {"type": "object"}
+      }
+    }
+  }
+}

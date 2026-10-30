@@ -1,0 +1,13 @@
+# B5 masks. Torch is enough for the B0 CUDA check.
+# Before B5, clone https://github.com/IDEA-Research/Grounded-SAM-2 into third_party/Grounded-SAM-2
+# and install it into this env. Do not patch that checkout; fix this file if torch cannot see CUDA.
+name: gsam2
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu121
+      - torch==2.1.2+cu121
+      - torchvision==0.16.2+cu121

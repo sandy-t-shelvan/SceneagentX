@@ -1,0 +1,15 @@
+# COLMAP, nerfstudio splatfacto, and gsplat. Used by B2, B3, and B4.
+# nerfstudio 1.1.4 requires gsplat==1.0.0. gsplat compiles CUDA kernels on install.
+name: nerf
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - colmap
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu121
+      - torch==2.1.2+cu121
+      - torchvision==0.16.2+cu121
+      - nerfstudio==1.1.4
+      - gsplat==1.0.0
